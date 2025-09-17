@@ -1,0 +1,10 @@
+__pycache__
+wandb
+output
+preprocessed_data*
+pretrained_weights
+results
+selfdefine
+image
+mesh
+output_partcrafter
