@@ -1,7 +1,24 @@
+
 #!/usr/bin/env python3
 """
-Extract watertight surface mesh using voxelization and marching cubes.
-Processes each part separately and normalizes the final result.
+voxel_surface.py
+
+Extract per-part watertight surface mesh via voxelization + marching cubes,
+with **robust scaling for thin parts**, **filled occupancy** for watertightness,
+and **aggressive post-cleaning** to remove zero faces/duplicates and shrink size.
+
+Key fixes vs original:
+- Anisotropic axis-wise rescale to match each original extent (prevents thin parts from shrinking).
+- Guarantee at least N voxels across the thinnest dimension (configurable) while respecting memory limits.
+- Fill the voxel grid before marching cubes to enforce closed solids.
+- Stronger cleanup: weld/merge-vertices with tolerance, repeated degenerate-face removal, biggest component keep, optional decimation.
+
+Usage:
+  python voxel_surface.py <input_glb_or_folder> -r 100 --min-thickness-voxels 3 --weld-tol 1e-6 --target-faces 0
+
+Notes:
+- Requires trimesh >= 4.x and numpy.
+- target-faces=0 disables decimation; set to e.g. 50k to compress large meshes.
 """
 
 import argparse
@@ -10,291 +27,302 @@ import trimesh
 import numpy as np
 from pathlib import Path
 import os
+import math
 
+# --------------------------- helpers ---------------------------------
 
-def process_single_part(mesh, name, voxel_resolution):
-    """Process a single mesh part with voxelization."""
+def pretty_grid_shape(extents, pitch):
+    grid = np.maximum(1, np.ceil(extents / max(pitch, 1e-12)).astype(int))
+    return tuple(int(x) for x in grid)
+
+def estimate_voxel_memory_mb(extents, pitch, bytes_per_voxel=1.0):
+    # Approximate memory as grid_size product bytes (bool ~1B)
+    grid = np.maximum(1, np.ceil(extents / max(pitch, 1e-12)).astype(float))
+    voxels = float(np.prod(grid))
+    return voxels * bytes_per_voxel / (1024.0 * 1024.0)
+
+def robust_cleanup_mesh(mesh: trimesh.Trimesh, weld_tol: float, loop_passes: int = 2):
+    """
+    A stronger cleanup: weld vertices, remove duplicates/degenerates repeatedly,
+    drop tiny connected components, and fix normals. Returns a new mesh object.
+    """
+    if mesh is None or not isinstance(mesh, trimesh.Trimesh):
+        return mesh
+
+    m = mesh.copy()
+
+    # Weld close vertices first to kill near-zero triangles
+    try:
+        m.merge_vertices(radius=max(weld_tol, 0.0))
+    except Exception:
+        pass
+
+    for _ in range(max(1, loop_passes)):
+        try:
+            if hasattr(m, 'unique_faces'):
+                m.update_faces(m.unique_faces())
+            else:
+                m.remove_duplicate_faces()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(m, 'nondegenerate_faces'):
+                m.update_faces(m.nondegenerate_faces())
+            else:
+                m.remove_degenerate_faces()
+        except Exception:
+            pass
+
+        try:
+            m.remove_unreferenced_vertices()
+        except Exception:
+            pass
+
+        try:
+            trimesh.repair.fix_normals(m)
+        except Exception:
+            pass
+
+    # Keep the biggest connected component to avoid floating junk
+    try:
+        parts = m.split(only_watertight=False)
+        if len(parts) >= 2:
+            parts = sorted(parts, key=lambda p: (len(p.faces), p.volume if p.is_volume else 0.0), reverse=True)
+            m = parts[0]
+    except Exception:
+        pass
+
+    return m
+
+def ensure_axiswise_rescale(shell: trimesh.Trimesh, original_center, original_extents):
+    """
+    Apply **anisotropic** rescale so that the marching-cubes shell matches
+    the original extents on each axis. This prevents thin parts from shrinking.
+    """
+    if not isinstance(shell, trimesh.Trimesh):
+        return shell
+
+    shell = shell.copy()
+    se = shell.extents
+    # Avoid division by zero if shell had degenerate axis
+    scale = np.divide(original_extents, np.maximum(se, 1e-12))
+
+    # Build 4x4 scale matrix (axis-wise)
+    S = np.eye(4)
+    S[:3, :3] = np.diag(scale)
+
+    # Translate to origin, scale, then translate to original_center
+    c = shell.bounds.mean(axis=0)
+    T1 = np.eye(4); T1[:3, 3] = -c
+    T2 = np.eye(4); T2[:3, 3] = original_center
+
+    M = T2 @ S @ T1
+    shell.apply_transform(M)
+    return shell
+
+def compute_pitch_with_thickness_guard(extents, voxel_resolution, min_thickness_voxels, mem_limit_mb):
+    """
+    Start from user resolution on the largest extent, but **guard** the thinnest axis so it still
+    has >= min_thickness_voxels (helps doors/sheets). If memory explodes, relax gracefully.
+    """
+    extents = np.maximum(extents, 1e-9)
+    # Candidate 1: standard pitch so that largest axis ~= voxel_resolution
+    pitch_by_res = float(np.max(extents)) / max(1, voxel_resolution)
+    # Candidate 2: ensure thinnest axis has enough voxels
+    pitch_by_thin = float(np.min(extents)) / max(1, min_thickness_voxels)
+
+    # Use smaller pitch (higher resolution) to satisfy both goals
+    pitch = min(pitch_by_res, pitch_by_thin)
+
+    # Memory check; if too high, increase pitch uniformly
+    mem_mb = estimate_voxel_memory_mb(extents, pitch)
+    if mem_mb > mem_limit_mb:
+        scale = (mem_limit_mb / max(mem_mb, 1e-9)) ** (1.0/3.0)
+        pitch /= max(scale, 1e-6)  # increase pitch (coarser) => fewer voxels
+    return pitch
+
+# --------------------------- core pipeline ----------------------------
+
+def process_single_part(mesh, name, voxel_resolution, min_thickness_voxels, mem_limit_mb, weld_tol, target_faces):
     print(f"  Processing part: {name}")
-    
+
     if not isinstance(mesh, trimesh.Trimesh):
         print(f"  Skipping {name} (not a mesh)")
         return mesh
-    
-    print(f"  Original: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+
+    print(f"  Original: {len(mesh.vertices)} v, {len(mesh.faces)} f")
     print(f"  Watertight: {mesh.is_watertight}")
-    
-    # If already watertight, skip voxelization
-    if mesh.is_watertight:
-        print(f"  {name} is already watertight, skipping voxelization")
-        return mesh
-    
-    # Calculate voxel pitch (size)
-    if max(mesh.extents) == 0:
+    original_bounds = mesh.bounds
+    original_center = original_bounds.mean(axis=0)
+    original_extents = mesh.extents
+
+    # Quick early exit: already watertight and clean-ish
+    if mesh.is_watertight and len(mesh.faces) > 0:
+        m = robust_cleanup_mesh(mesh, weld_tol=weld_tol, loop_passes=1)
+        print(f"  {name} already watertight; minor cleanup only -> {len(m.vertices)} v, {len(m.faces)} f")
+        return m
+
+    if np.max(original_extents) <= 0:
         print(f"  {name} has zero extents, skipping")
         return mesh
-        
-    pitch = max(mesh.extents) / voxel_resolution
-    
-    # Estimate memory usage
-    estimated_voxels = (mesh.extents / pitch).prod()
-    estimated_memory_mb = estimated_voxels * 1 / (1024 * 1024)
-    
-    if estimated_memory_mb > 500:
-        print(f"  High memory usage predicted ({estimated_memory_mb:.1f} MB), reducing resolution...")
-        target_memory_mb = 200
-        scale_factor = (target_memory_mb / estimated_memory_mb) ** (1/3)
-        voxel_resolution = max(10, int(voxel_resolution * scale_factor))
-        pitch = max(mesh.extents) / voxel_resolution
-        print(f"  Adjusted resolution: {voxel_resolution}")
-    
+
+    # Compute a pitch that respects both user resolution and thin-part guard
+    pitch = compute_pitch_with_thickness_guard(
+        original_extents, voxel_resolution, min_thickness_voxels, mem_limit_mb
+    )
+    grid_shape = pretty_grid_shape(original_extents, pitch)
+    mem_mb = estimate_voxel_memory_mb(original_extents, pitch)
+    print(f"  Pitch: {pitch:.6g} | Grid ~ {grid_shape} | ~{mem_mb:.1f} MB")
+
     try:
-        # Store original mesh properties
-        original_bounds = mesh.bounds
-        original_center = mesh.bounds.mean(axis=0)
-        original_extents = mesh.extents
-        
-        # Voxelize the mesh
+        # Voxelize; fill occupancy to get a solid => marching cubes closed surface
         vox = mesh.voxelized(pitch=pitch)
-        
-        # Extract isosurface using marching cubes
+        # Fill interior and small holes if the API exists
+        try:
+            if hasattr(vox, 'fill'):
+                vox = vox.fill()
+                print("  Filled voxel grid (closed occupancy).")
+        except Exception as e:
+            print(f"  Voxel fill skipped: {e}")
+
+        # Marching cubes
         shell = vox.marching_cubes
-        
-        # Transform shell back to original position and scale
-        voxel_bounds = shell.bounds
-        voxel_center = shell.bounds.mean(axis=0)
-        voxel_extents = shell.extents
-        
-        # Calculate scale factor to match original extents
-        scale_factors = original_extents / voxel_extents
-        # Use minimum scale factor to preserve aspect ratio
-        scale_factor = np.min(scale_factors[scale_factors > 0])
-        
-        # Apply transformation: scale first, then translate
-        shell.vertices = shell.vertices * scale_factor
-        shell_center_after_scale = shell.bounds.mean(axis=0)
-        translation = original_center - shell_center_after_scale
-        shell.vertices = shell.vertices + translation
-        
-        # Clean up
-        shell.update_faces(shell.nondegenerate_faces())
-        shell.remove_unreferenced_vertices()
-        
-        print(f"  Result: {len(shell.vertices)} vertices, {len(shell.faces)} faces")
-        print(f"  Watertight: {shell.is_watertight}")
-        print(f"  Scale factor: {scale_factor:.4f}")
-        
+
+        # Robust axis-wise rescale back to original extents + recenter
+        shell = ensure_axiswise_rescale(shell, original_center=original_center, original_extents=original_extents)
+
+        # Cleanup + (optional) decimate
+        shell = robust_cleanup_mesh(shell, weld_tol=weld_tol, loop_passes=2)
+
+        if isinstance(target_faces, int) and target_faces > 0 and len(shell.faces) > target_faces:
+            try:
+                shell = shell.simplify_quadratic_decimation(target_faces)
+                print(f"  Decimated to ~{target_faces} faces.")
+            except Exception as e:
+                print(f"  Decimation failed/skipped: {e}")
+
+        print(f"  Result: {len(shell.vertices)} v, {len(shell.faces)} f | Watertight: {shell.is_watertight}")
+        # Extra visibility for boundary edges
+        try:
+            be = getattr(shell, "edges_boundary", None)
+            if be is not None:
+                print(f"  Boundary edges: {len(be)}")
+        except Exception:
+            pass
+
         return shell
-        
+
     except (MemoryError, Exception) as e:
         print(f"  Error voxelizing {name}: {e}")
-        print(f"  Returning original mesh")
-        return mesh
+        print(f"  Returning original mesh (post-cleaned).")
+        return robust_cleanup_mesh(mesh, weld_tol=weld_tol, loop_passes=1)
 
-
-
-def process_file(input_path, output_path, voxel_resolution=100):
-    """Process a single GLB file and save to output path."""
+def process_file(input_path, output_path, voxel_resolution=100, min_thickness_voxels=3, mem_limit_mb=400,
+                 weld_tol=1e-6, target_faces=0):
+    """Process a single GLB/GLTF file and save to output path."""
     try:
-        print(f"Loading GLB file: {input_path}")
-        
-        # Load the GLB file as a scene
+        print(f"Loading GLB/GLTF: {input_path}")
         scene = trimesh.load(input_path, force='scene')
-        
+
         if isinstance(scene, trimesh.Scene):
             print(f"Found {len(scene.geometry)} parts")
-            
-            # Process each part separately
-            processed_geometries = {}
-            
+            processed = {}
             for name, mesh in scene.geometry.items():
-                processed_mesh = process_single_part(mesh, name, voxel_resolution)
-                processed_geometries[name] = processed_mesh
-            
-            # Create new scene
-            new_scene = trimesh.Scene(geometry=processed_geometries)
-            
+                processed[name] = process_single_part(mesh, name, voxel_resolution, min_thickness_voxels,
+                                                      mem_limit_mb, weld_tol, target_faces)
+            new_scene = trimesh.Scene(geometry=processed)
         else:
             print("Single mesh loaded")
-            new_scene = process_single_part(scene, "main_mesh", voxel_resolution)
-        
-        # Clean up meshes using trimesh's built-in methods
-        print("\nCleaning up meshes...")
+            new_scene = process_single_part(scene, "main_mesh", voxel_resolution, min_thickness_voxels,
+                                            mem_limit_mb, weld_tol, target_faces)
+
+        # Final pass cleanup for every mesh in scene
+        print("\nFinal scene cleanup...")
         if isinstance(new_scene, trimesh.Scene):
-            for name, mesh in new_scene.geometry.items():
+            for name, mesh in list(new_scene.geometry.items()):
                 if isinstance(mesh, trimesh.Trimesh):
-                    original_faces = len(mesh.faces)
-                    original_vertices = len(mesh.vertices)
-                    
-                    # Apply trimesh cleanup methods (using new API)
-                    if hasattr(mesh, 'unique_faces'):
-                        mesh.update_faces(mesh.unique_faces())
-                    else:
-                        mesh.remove_duplicate_faces()
-                    after_dup_faces = len(mesh.faces)
-                    
-                    # Remove degenerate faces (zero-area faces)
-                    if hasattr(mesh, 'nondegenerate_faces'):
-                        mesh.update_faces(mesh.nondegenerate_faces())
-                    else:
-                        mesh.remove_degenerate_faces()
-                    after_degen_faces = len(mesh.faces)
-                    
-                    mesh.remove_unreferenced_vertices()
-                    after_vertices = len(mesh.vertices)
-                    
-                    dup_removed = original_faces - after_dup_faces
-                    degen_removed = after_dup_faces - after_degen_faces
-                    vert_removed = original_vertices - after_vertices
-                    
-                    print(f"  {name}:")
-                    if dup_removed > 0:
-                        print(f"    Removed {dup_removed} duplicate faces")
-                    if degen_removed > 0:
-                        print(f"    Removed {degen_removed} degenerate faces")
-                    if vert_removed > 0:
-                        print(f"    Removed {vert_removed} unreferenced vertices")
-                    if dup_removed == 0 and degen_removed == 0 and vert_removed == 0:
-                        print(f"    No cleanup needed")
+                    cleaned = robust_cleanup_mesh(mesh, weld_tol=weld_tol, loop_passes=1)
+                    new_scene.geometry[name] = cleaned
+                    print(f"  {name}: {len(cleaned.vertices)} v, {len(cleaned.faces)} f | watertight={cleaned.is_watertight}")
         else:
             if isinstance(new_scene, trimesh.Trimesh):
-                original_faces = len(new_scene.faces)
-                original_vertices = len(new_scene.vertices)
-                
-                # Apply trimesh cleanup methods (using new API)
-                if hasattr(new_scene, 'unique_faces'):
-                    new_scene.update_faces(new_scene.unique_faces())
-                else:
-                    new_scene.remove_duplicate_faces()
-                after_dup_faces = len(new_scene.faces)
-                
-                # Remove degenerate faces (zero-area faces)
-                if hasattr(new_scene, 'nondegenerate_faces'):
-                    new_scene.update_faces(new_scene.nondegenerate_faces())
-                else:
-                    new_scene.remove_degenerate_faces()
-                after_degen_faces = len(new_scene.faces)
-                
-                new_scene.remove_unreferenced_vertices()
-                after_vertices = len(new_scene.vertices)
-                
-                dup_removed = original_faces - after_dup_faces
-                degen_removed = after_dup_faces - after_degen_faces
-                vert_removed = original_vertices - after_vertices
-                
-                if dup_removed > 0:
-                    print(f"  Removed {dup_removed} duplicate faces")
-                if degen_removed > 0:
-                    print(f"  Removed {degen_removed} degenerate faces")
-                if vert_removed > 0:
-                    print(f"  Removed {vert_removed} unreferenced vertices")
-                if dup_removed == 0 and degen_removed == 0 and vert_removed == 0:
-                    print("  No cleanup needed")
-        
+                new_scene = robust_cleanup_mesh(new_scene, weld_tol=weld_tol, loop_passes=1)
+                print(f"  Mesh: {len(new_scene.vertices)} v, {len(new_scene.faces)} f | watertight={new_scene.is_watertight}")
+
         final_scene = new_scene
-        
-        # Export the result
         final_scene.export(output_path)
-        print(f"Watertight surface saved to: {output_path}")
-        
+        print(f"Saved: {output_path}")
         return True
-        
+
     except Exception as e:
         print(f"Error processing file {input_path}: {e}")
         return False
 
-
-def process_folder(input_folder, voxel_resolution=100):
-    """Process all GLB files in a folder."""
+def process_folder(input_folder, voxel_resolution=100, min_thickness_voxels=3, mem_limit_mb=400,
+                   weld_tol=1e-6, target_faces=0):
+    """Process all GLB/GLTF files in a folder."""
     input_path = Path(input_folder)
-    
     if not input_path.exists():
         print(f"Error: Input folder {input_path} does not exist")
         return False
-    
     if not input_path.is_dir():
         print(f"Error: {input_path} is not a directory")
         return False
-    
-    # Create output folder with '_voxel' suffix
+
     output_folder = input_path.parent / f"{input_path.name}_voxel"
     output_folder.mkdir(exist_ok=True)
-    
-    # Find all GLB files
+
     glb_files = list(input_path.glob("*.glb")) + list(input_path.glob("*.gltf"))
-    
     if not glb_files:
-        print(f"No GLB/GLTF files found in {input_path}")
+        print(f"No GLB/GLTF found in {input_path}")
         return False
-    
-    print(f"Found {len(glb_files)} GLB/GLTF files in {input_path}")
-    print(f"Output folder: {output_folder}")
+
+    print(f"Found {len(glb_files)} file(s)")
+    print(f"Output -> {output_folder}")
     print("-" * 60)
-    
-    success_count = 0
-    total_count = len(glb_files)
-    
-    for i, glb_file in enumerate(glb_files, 1):
-        print(f"\n[{i}/{total_count}] Processing: {glb_file.name}")
-        
-        # Preserve original filename
-        output_file = output_folder / glb_file.name
-        
-        if process_file(glb_file, output_file, voxel_resolution):
-            success_count += 1
-        
+
+    ok = 0
+    for i, p in enumerate(glb_files, 1):
+        print(f"\n[{i}/{len(glb_files)}] {p.name}")
+        out = output_folder / p.name
+        if process_file(p, out, voxel_resolution, min_thickness_voxels, mem_limit_mb, weld_tol, target_faces):
+            ok += 1
         print("-" * 40)
-    
-    print(f"\nProcessing complete: {success_count}/{total_count} files processed successfully")
-    return success_count == total_count
 
-
-def extract_voxel_surface_per_part(input_path, voxel_resolution=100):
-    """Extract watertight surface for each part separately (legacy function for single file)."""
-    output_path = input_path.parent / f"{input_path.stem}_voxel_surface_{voxel_resolution}.glb"
-    return process_file(input_path, output_path, voxel_resolution)
-
+    print(f"\nDone: {ok}/{len(glb_files)} succeeded")
+    return ok == len(glb_files)
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract watertight surface using voxelization")
-    parser.add_argument("input_path", help="Path to input GLB file or folder containing GLB files")
-    parser.add_argument("-r", "--resolution", type=int, default=100, 
-                       help="Voxel resolution (default: 100, higher = more detail)")
-    
-    args = parser.parse_args()
-    
+    ap = argparse.ArgumentParser(description="Extract watertight surface (robust thin-part scaling).")
+    ap.add_argument("input_path", help="Path to input GLB/GLTF file OR folder")
+    ap.add_argument("-r", "--resolution", type=int, default=100, help="Voxel resolution along largest axis (default 100)")
+    ap.add_argument("--min-thickness-voxels", type=int, default=3, help="Guard: minimum voxels across thinnest axis (default 3)")
+    ap.add_argument("--mem-limit-mb", type=int, default=400, help="Rough memory cap for voxel grid (default 400MB)")
+    ap.add_argument("--weld-tol", type=float, default=1e-6, help="Vertex weld tolerance in world units (default 1e-6)")
+    ap.add_argument("--target-faces", type=int, default=0, help="Optional decimation target faces (0=disabled)")
+    args = ap.parse_args()
+
     input_path = Path(args.input_path)
     if not input_path.exists():
         print(f"Error: Input path {input_path} does not exist")
         sys.exit(1)
-    
-    print(f"Input: {input_path}")
-    print(f"Voxel resolution: {args.resolution}")
-    print("-" * 60)
-    
-    success = False
-    
-    if input_path.is_dir():
-        # Process folder
-        success = process_folder(input_path, args.resolution)
-    elif input_path.is_file():
-        # Process single file
-        if not input_path.suffix.lower() in ['.glb', '.gltf']:
-            print(f"Warning: File {input_path} may not be a GLB/GLTF file")
-        
-        output_path = input_path.parent / f"{input_path.stem}_voxel_surface_{args.resolution}.glb"
-        print(f"Output: {output_path}")
-        success = extract_voxel_surface_per_part(input_path, args.resolution)
-    else:
-        print(f"Error: {input_path} is neither a file nor a directory")
-        sys.exit(1)
-    
-    if success:
-        print("\n✓ Successfully extracted watertight surface!")
-    else:
-        print("\n✗ Failed to extract surface")
-    
-    sys.exit(0 if success else 1)
 
+    print(f"Input: {input_path}")
+    print(f"Resolution: {args.resolution} | MinThicknessVoxels: {args.min_thickness_voxels} | MemLimit: {args.mem_limit_mb}MB")
+    print(f"WeldTol: {args.weld_tol} | TargetFaces: {args.target_faces}")
+    print("-" * 60)
+
+    if input_path.is_dir():
+        ok = process_folder(input_path, args.resolution, args.min_thickness_voxels,
+                            args.mem_limit_mb, args.weld_tol, args.target_faces)
+    else:
+        # Single file
+        out = input_path.parent / f"{input_path.stem}_voxel_{args.resolution}.glb"
+        ok = process_file(input_path, out, args.resolution, args.min_thickness_voxels,
+                          args.mem_limit_mb, args.weld_tol, args.target_faces)
+
+    sys.exit(0 if ok else 1)
 
 if __name__ == "__main__":
     main()
