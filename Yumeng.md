@@ -1,11 +1,13 @@
 ## 预处理数据
 
-### 1. 处理partnet-mobility的mesh，obj+mtl -> mtl
+### 1. 处理partnet-mobility的mesh，obj+mtl -> glb
 ```
-python partnet_merge_with_materials.py mesh/partnet mesh/partnet_glb --single 35059
+python merge_to_glb_part.py mesh/partnet mesh/partnet_glb --single 35059
+python merge_to_glb_texture.py mesh/partnet mesh/partnet_glb --single 35059
+python merge_to_glb.py mesh/partnet mesh/partnet_glb --single 35059
 ```
 
-### 1. 生成voxel的mesh
+### 2. 生成voxel的mesh
 处理单个文件
 ```
 python voxel_surface.py path/to/file.glb -r 200
@@ -17,9 +19,12 @@ python voxel_surface.py mesh/drawers_test -r 200
 ### 实际运行
 python voxel_surface.py mesh/glb_part -r 200
 ```
-
-### 2. 根据PartCrafter的要求预处理partnet-mobility
+处理subfolder
 ```
-CUDA_VISIBLE_DEVICES=7 \
-	python datasets/preprocess/preprocess_partnet.py
+python voxel_surface.py mesh/partnet_glb --subfolder -r 200
+```
+
+### 3. 根据PartCrafter的要求预处理partnet-mobility
+```
+CUDA_VISIBLE_DEVICES=7 python datasets/preprocess/preprocess_partnet.py --input mesh/partnet_glb --output preprocessed_data
 ```

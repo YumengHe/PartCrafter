@@ -293,6 +293,51 @@ def process_folder(input_folder, voxel_resolution=100, min_thickness_voxels=3, m
     print(f"\nDone: {ok}/{len(glb_files)} succeeded")
     return ok == len(glb_files)
 
+def process_subfolders(input_folder, voxel_resolution=100, min_thickness_voxels=3, mem_limit_mb=400,
+                      weld_tol=1e-6, target_faces=0):
+    """Process all subfolders containing part.glb files."""
+    input_path = Path(input_folder)
+    if not input_path.exists():
+        print(f"Error: Input folder {input_path} does not exist")
+        return False
+    if not input_path.is_dir():
+        print(f"Error: {input_path} is not a directory")
+        return False
+
+    # Find all subdirectories that contain part.glb
+    subfolders = []
+    for subfolder in input_path.iterdir():
+        if subfolder.is_dir():
+            part_glb = subfolder / "part.glb"
+            if part_glb.exists():
+                subfolders.append(subfolder)
+
+    if not subfolders:
+        print(f"No subfolders with part.glb found in {input_path}")
+        return False
+
+    print(f"Found {len(subfolders)} subfolder(s) with part.glb")
+    print(f"Input directory: {input_path}")
+    print("-" * 60)
+
+    ok = 0
+    for i, subfolder in enumerate(subfolders, 1):
+        print(f"\n[{i}/{len(subfolders)}] Processing {subfolder.name}/part.glb")
+        
+        part_glb_path = subfolder / "part.glb"
+        voxel_output_path = subfolder / "voxel.glb"
+        
+        if process_file(part_glb_path, voxel_output_path, voxel_resolution, min_thickness_voxels, 
+                       mem_limit_mb, weld_tol, target_faces):
+            ok += 1
+            print(f"✓ Created: {voxel_output_path}")
+        else:
+            print(f"✗ Failed to process {subfolder.name}/part.glb")
+        print("-" * 40)
+
+    print(f"\nDone: {ok}/{len(subfolders)} succeeded")
+    return ok == len(subfolders)
+
 def main():
     ap = argparse.ArgumentParser(description="Extract watertight surface (robust thin-part scaling).")
     ap.add_argument("input_path", help="Path to input GLB/GLTF file OR folder")
@@ -301,6 +346,7 @@ def main():
     ap.add_argument("--mem-limit-mb", type=int, default=400, help="Rough memory cap for voxel grid (default 400MB)")
     ap.add_argument("--weld-tol", type=float, default=1e-6, help="Vertex weld tolerance in world units (default 1e-6)")
     ap.add_argument("--target-faces", type=int, default=0, help="Optional decimation target faces (0=disabled)")
+    ap.add_argument("--subfolder", action="store_true", help="Process subfolders containing part.glb files, output as voxel.glb")
     args = ap.parse_args()
 
     input_path = Path(args.input_path)
@@ -311,9 +357,19 @@ def main():
     print(f"Input: {input_path}")
     print(f"Resolution: {args.resolution} | MinThicknessVoxels: {args.min_thickness_voxels} | MemLimit: {args.mem_limit_mb}MB")
     print(f"WeldTol: {args.weld_tol} | TargetFaces: {args.target_faces}")
+    if args.subfolder:
+        print("Mode: Subfolder processing (part.glb -> voxel.glb)")
     print("-" * 60)
 
-    if input_path.is_dir():
+    if args.subfolder:
+        # Process subfolders containing part.glb files
+        if not input_path.is_dir():
+            print(f"Error: --subfolder requires a directory, but {input_path} is not a directory")
+            sys.exit(1)
+        ok = process_subfolders(input_path, args.resolution, args.min_thickness_voxels,
+                               args.mem_limit_mb, args.weld_tol, args.target_faces)
+    elif input_path.is_dir():
+        # Regular folder processing
         ok = process_folder(input_path, args.resolution, args.min_thickness_voxels,
                             args.mem_limit_mb, args.weld_tol, args.target_faces)
     else:

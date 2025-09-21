@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', type=str, default='mesh/glb_texture')
+    parser.add_argument('--input', type=str, default='mesh/partnet_glb', help='Input directory containing subfolders with part.glb and texture.glb')
     parser.add_argument('--output', type=str, default='preprocessed_data')
     args = parser.parse_args()
 
@@ -18,40 +18,62 @@ if __name__ == '__main__':
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
-    for mesh_name in tqdm(os.listdir(input_path)):
-        mesh_path = os.path.join(input_path, mesh_name)
+    # Get all subfolders (all have same format: part.glb + texture.glb)
+    subfolders = [item for item in os.listdir(input_path) 
+                  if os.path.isdir(os.path.join(input_path, item))]
+
+    print(f"Found {len(subfolders)} subfolders")
+
+    for object_id in tqdm(subfolders):
+        subfolder_path = os.path.join(input_path, object_id)
         
-        # Use textured GLB for rendering
-        textured_glb_path = os.path.join('mesh/glb_texture', mesh_name)
-        # Use parts GLB for NPY generation  
-        parts_glb_path = os.path.join('mesh/glb_part_voxel', mesh_name)
+        # Use texture.glb for rendering
+        textured_glb_path = os.path.join(subfolder_path, 'texture.glb')
         
-        # 1. Sample points from mesh surface (using glb_part_voxel)
-        os.system(f"python datasets/preprocess/mesh_to_point.py --input {parts_glb_path} --output {output_path}")
-        # 2. Render images (using glb_texture)
-        os.system(f"python datasets/preprocess/render.py --input {textured_glb_path} --output {output_path}")
-        # 3. Remove background for rendered images and resize to 90%
-        export_mesh_folder = os.path.join(output_path, mesh_name.replace('.glb', ''))
-        export_rendering_path = os.path.join(export_mesh_folder, 'rendering.png')
-        os.system(f"python datasets/preprocess/rmbg.py --input {export_rendering_path} --output {output_path}")
+        # Check if voxel.glb exists, use it instead of part.glb
+        voxel_glb_path = os.path.join(subfolder_path, 'voxel.glb')
+        part_glb_path = os.path.join(subfolder_path, 'part.glb')
+        
+        if os.path.exists(voxel_glb_path):
+            parts_glb_path = voxel_glb_path
+            mesh_type = "voxel"
+        else:
+            parts_glb_path = part_glb_path
+            mesh_type = "part"
+        
+        print(f"Processing {object_id}: using {mesh_type}.glb for point sampling")
+        
+        # 1. Sample points from mesh surface (using voxel.glb or part.glb)
+        os.system(f"python datasets/preprocess/mesh_to_point.py --input {parts_glb_path} --output {output_path} --name {object_id}")
+        # 2. Render images (using texture.glb)
+        os.system(f"python datasets/preprocess/render.py --input {textured_glb_path} --output {output_path} --name {object_id}")
+        # 3. Skip background removal and resizing - keep original rendering.png
         # 4. Skip IoU calculation 
         time.sleep(1)
     
     # generate configs
     configs = []
-    for mesh_name in tqdm(os.listdir(input_path)):
-        mesh_path = os.path.join(output_path, mesh_name.replace('.glb', ''))
+    for object_id in tqdm(subfolders):
+        # Fixed structure: preprocessed_data/object_id/
+        mesh_path = os.path.join(output_path, object_id)
         num_parts_path = os.path.join(mesh_path, 'num_parts.json')
         surface_path = os.path.join(mesh_path, 'points.npy')
-        image_path = os.path.join(mesh_path, 'rendering_rmbg.png')
+        image_path = os.path.join(mesh_path, 'rendering.png')
         
-        parts_glb_path = os.path.join('mesh/glb_part_voxel', mesh_name)
+        # Use voxel.glb if available, otherwise part.glb for training
+        voxel_glb_path = os.path.join(input_path, object_id, 'voxel.glb')
+        part_glb_path = os.path.join(input_path, object_id, 'part.glb')
+        
+        if os.path.exists(voxel_glb_path):
+            parts_glb_path = voxel_glb_path
+        else:
+            parts_glb_path = part_glb_path
         
         config = {
-            "file": mesh_name,
+            "file": object_id,
             "num_parts": 0,
             "valid": False,
-            "mesh_path": parts_glb_path,  # Use glb_part_voxel for mesh_path
+            "mesh_path": parts_glb_path,  # Use part.glb for mesh_path
             "surface_path": None,
             "image_path": None,
             "iou_mean": 0.0,  # No IoU calculation
@@ -59,14 +81,14 @@ if __name__ == '__main__':
         }
         try:
             config["num_parts"] = json.load(open(num_parts_path))['num_parts']
-            # Skip IoU loading since we don't calculate it
             assert os.path.exists(surface_path)
             config['surface_path'] = surface_path
             assert os.path.exists(image_path)
             config['image_path'] = image_path
             config['valid'] = True
             configs.append(config)
-        except:
+        except Exception as e:
+            print(f"Error processing {object_id}: {e}")
             continue
     
     configs_path = os.path.join(output_path, 'object_part_configs.json')

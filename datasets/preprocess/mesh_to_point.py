@@ -10,6 +10,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, default='assets/objects/scissors.glb')
     parser.add_argument('--output', type=str, default='preprocessed_data')
+    parser.add_argument('--name', type=str, default=None, help='Custom output folder name')
     args = parser.parse_args()
 
     input_path = args.input
@@ -17,7 +18,11 @@ if __name__ == '__main__':
 
     assert os.path.exists(input_path), f'{input_path} does not exist'
 
-    mesh_name = os.path.basename(input_path).split('.')[0]
+    # Use custom name if provided, otherwise extract from filename
+    if args.name:
+        mesh_name = args.name
+    else:
+        mesh_name = os.path.basename(input_path).split('.')[0]
     output_path = os.path.join(output_path, mesh_name)
     if not os.path.exists(output_path):
         os.makedirs(output_path)
