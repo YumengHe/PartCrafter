@@ -20,9 +20,8 @@ from src.utils.render_utils import render_single_view
 
 RADIUS = 4
 IMAGE_SIZE = (2048, 2048)
-LIGHT_INTENSITY = 1.0
+LIGHT_INTENSITY = 2.0
 NUM_ENV_LIGHTS = 36
-
 
 def parse_urdf_links(urdf_path):
     """

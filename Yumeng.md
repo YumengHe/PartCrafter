@@ -22,7 +22,7 @@ python voxel_surface.py mesh/glb_part -r 200
 ```
 处理subfolder
 ```
-python voxel_surface.py mesh/partnet_glb --subfolder -r 200
+python voxel_surface.py mesh/partnet_glb --subfolder -r 100
 ```
 
 ### 3. 根据PartCrafter的要求预处理partnet-mobility

@@ -13,7 +13,7 @@ from src.utils.render_utils import render_single_view
 RADIUS = 4
 IMAGE_SIZE = (2048, 2048)
 # 改变光照强度
-LIGHT_INTENSITY = 1.0
+LIGHT_INTENSITY = 2.0
 NUM_ENV_LIGHTS = 36
 
 def load_all_textured_objs(textured_objs_dir: Path, images_dir: Path) -> trimesh.Scene:
