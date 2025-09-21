@@ -1,10 +1,11 @@
 ## 预处理数据
+pip install -U "trimesh[easy]" pillow pygltflib
+
 
 ### 1. 处理partnet-mobility的mesh，obj+mtl -> glb
 ```
-python merge_to_glb_part.py mesh/partnet mesh/partnet_glb --single 35059
-python merge_to_glb_texture.py mesh/partnet mesh/partnet_glb --single 35059
-python merge_to_glb.py mesh/partnet mesh/partnet_glb --single 35059
+python merge_to_glb.py mesh/partnet_test mesh/partnet_glb
+python merge_to_glb.py mesh/partnet_test mesh/partnet_glb --single 40147
 ```
 
 ### 2. 生成voxel的mesh

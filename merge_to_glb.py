@@ -12,13 +12,20 @@ Usage:
 import os
 import sys
 import argparse
-import trimesh
+import shutil
 from pathlib import Path
-import numpy as np
+from typing import Optional, List, Dict
+
+try:
+    import trimesh
+    import numpy as np
+except ImportError:
+    print("Error: Required packages not found.")
+    print("Please install: pip install trimesh[easy] numpy")
+    sys.exit(1)
+
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-import shutil
-from typing import Optional, List, Tuple, Dict
 
 def parse_urdf_links(urdf_path: Path) -> Dict[str, List[str]]:
     """
@@ -177,148 +184,12 @@ def merge_parts(input_dir: Path, object_id: str) -> Optional[trimesh.Scene]:
     print(f"  Total parts (links) created: {parts_created}")
     return scene
 
-def read_mtl_file(mtl_path: Path) -> Dict[str, Dict]:
-    """Parse MTL file and extract material properties."""
-    materials = {}
-    current_material = None
-    
-    if not mtl_path.exists():
-        return materials
-    
-    with open(mtl_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
-            parts = line.split()
-            if not parts:
-                continue
-            
-            command = parts[0]
-            
-            if command == 'newmtl':
-                current_material = parts[1]
-                materials[current_material] = {}
-            elif current_material and len(parts) >= 2:
-                if command == 'Kd':  # Diffuse color
-                    materials[current_material]['diffuse'] = [float(x) for x in parts[1:4]]
-                elif command == 'Ks':  # Specular color
-                    materials[current_material]['specular'] = [float(x) for x in parts[1:4]]
-                elif command == 'map_Kd':  # Diffuse texture
-                    materials[current_material]['diffuse_texture'] = parts[1]
-                elif command == 'Ns':  # Specular exponent
-                    materials[current_material]['shininess'] = float(parts[1])
-                elif command == 'd' or command == 'Tr':  # Transparency
-                    materials[current_material]['transparency'] = float(parts[1])
-    
-    return materials
+# Removed material loading functions since we're copying original folders directly
 
-def load_obj_with_materials(obj_path: Path, images_dir: Path) -> Optional[trimesh.Scene]:
-    """Load OBJ file with materials and textures."""
-    try:
-        # Load the mesh
-        mesh = trimesh.load(str(obj_path))
-        
-        # If it's a single mesh, convert to scene
-        if isinstance(mesh, trimesh.Trimesh):
-            scene = trimesh.Scene([mesh])
-        elif isinstance(mesh, trimesh.Scene):
-            scene = mesh
-        else:
-            print(f"Warning: Unexpected mesh type for {obj_path}")
-            return None
-        
-        # Load materials from MTL file
-        mtl_path = obj_path.with_suffix('.mtl')
-        materials = read_mtl_file(mtl_path)
-        
-        # Apply materials to meshes in the scene
-        for geometry_name, geometry in scene.geometry.items():
-            if hasattr(geometry, 'visual') and hasattr(geometry.visual, 'material'):
-                # Try to find corresponding material
-                material_name = None
-                if hasattr(geometry.visual.material, 'name'):
-                    material_name = geometry.visual.material.name
-                
-                if material_name and material_name in materials:
-                    material_props = materials[material_name]
-                    
-                    # Set diffuse color
-                    if 'diffuse' in material_props:
-                        diffuse = material_props['diffuse']
-                        if len(diffuse) >= 3:
-                            # Convert to RGBA (add alpha = 1.0)
-                            rgba = diffuse + [1.0] if len(diffuse) == 3 else diffuse
-                            geometry.visual.material.diffuse = rgba
-                    
-                    # Handle texture
-                    if 'diffuse_texture' in material_props:
-                        texture_path = material_props['diffuse_texture']
-                        # Handle relative paths
-                        if texture_path.startswith('../images/'):
-                            texture_filename = texture_path.replace('../images/', '')
-                            full_texture_path = images_dir / texture_filename
-                            if full_texture_path.exists():
-                                try:
-                                    # Load texture image
-                                    from PIL import Image
-                                    image = Image.open(full_texture_path)
-                                    geometry.visual.material.image = image
-                                except Exception as e:
-                                    print(f"Warning: Could not load texture {full_texture_path}: {e}")
-        
-        return scene
-    
-    except Exception as e:
-        print(f"Error loading {obj_path}: {e}")
-        return None
-
-def preserve_parts_with_textures(input_dir: Path, object_id: str) -> Optional[trimesh.Scene]:
-    """Preserve original parts with textures using merge_to_glb_texture.py approach"""
-    object_dir = input_dir / object_id
-    textured_objs_dir = object_dir / "textured_objs"
-    images_dir = object_dir / "images"
-    
-    if not textured_objs_dir.exists():
-        print(f"Warning: {textured_objs_dir} does not exist")
-        return None
-    
-    # Get all OBJ files
-    obj_files = list(textured_objs_dir.glob("*.obj"))
-    if not obj_files:
-        print(f"Warning: No OBJ files found in {textured_objs_dir}")
-        return None
-    
-    print(f"Found {len(obj_files)} OBJ files")
-    
-    # Create a combined scene
-    combined_scene = trimesh.Scene()
-    
-    # Load and merge all OBJ files
-    for i, obj_file in enumerate(obj_files):
-        print(f"  Loading {obj_file.name}...")
-        
-        scene = load_obj_with_materials(obj_file, images_dir)
-        if scene is None:
-            print(f"  Warning: Failed to load {obj_file}")
-            continue
-        
-        # Add all geometries from this scene to the combined scene
-        for geom_name, geometry in scene.geometry.items():
-            # Create unique name to avoid conflicts
-            unique_name = f"{obj_file.stem}_{geom_name}"
-            combined_scene.add_geometry(geometry, geom_name=unique_name)
-    
-    if len(combined_scene.geometry) == 0:
-        print(f"Warning: No geometries were successfully loaded for {object_id}")
-        return None
-    
-    print(f"  Combined {len(combined_scene.geometry)} geometries")
-    return combined_scene
+# Removed preserve_parts_with_textures function since we're copying folders directly
 
 def process_object(input_dir: Path, output_dir: Path, object_id: str) -> bool:
-    """Process a single object to create both part.glb and texture.glb"""
+    """Process a single object to create part.glb and copy original data folders"""
     print(f"\nProcessing object: {object_id}")
     
     # Create output directory for this object
@@ -335,6 +206,7 @@ def process_object(input_dir: Path, output_dir: Path, object_id: str) -> bool:
         try:
             shutil.copy2(str(urdf_input_path), str(urdf_output_path))
             print(f"✓ Copied: {urdf_output_path}")
+            success_count += 1
         except Exception as e:
             print(f"✗ Failed to copy mobility.urdf: {e}")
     else:
@@ -354,21 +226,35 @@ def process_object(input_dir: Path, output_dir: Path, object_id: str) -> bool:
     else:
         print("✗ Failed to create merged scene")
     
-    # Generate texture.glb (original parts with textures)
-    print("Creating texture.glb (parts with textures)...")
-    textured_scene = preserve_parts_with_textures(input_dir, object_id)
-    if textured_scene is not None:
-        texture_output_path = object_output_dir / "texture.glb"
+    # Copy images folder
+    print("Copying images folder...")
+    images_input_path = input_dir / object_id / "images"
+    if images_input_path.exists():
+        images_output_path = object_output_dir / "images"
         try:
-            textured_scene.export(str(texture_output_path))
-            print(f"✓ Saved: {texture_output_path}")
+            shutil.copytree(str(images_input_path), str(images_output_path), dirs_exist_ok=True)
+            print(f"✓ Copied: {images_output_path}")
             success_count += 1
         except Exception as e:
-            print(f"✗ Failed to save texture.glb: {e}")
+            print(f"✗ Failed to copy images folder: {e}")
     else:
-        print("✗ Failed to create textured scene")
+        print("✗ images folder not found")
     
-    return success_count == 2
+    # Copy textured_objs folder
+    print("Copying textured_objs folder...")
+    textured_objs_input_path = input_dir / object_id / "textured_objs"
+    if textured_objs_input_path.exists():
+        textured_objs_output_path = object_output_dir / "textured_objs"
+        try:
+            shutil.copytree(str(textured_objs_input_path), str(textured_objs_output_path), dirs_exist_ok=True)
+            print(f"✓ Copied: {textured_objs_output_path}")
+            success_count += 1
+        except Exception as e:
+            print(f"✗ Failed to copy textured_objs folder: {e}")
+    else:
+        print("✗ textured_objs folder not found")
+    
+    return success_count >= 3  # urdf + part.glb + at least one folder copied
 
 def main():
     parser = argparse.ArgumentParser(description="Merge OBJ files to GLB format with two variants")
