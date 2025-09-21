@@ -1,4 +1,10 @@
 ## 预处理数据
+
+### 1. 处理partnet-mobility的mesh，obj+mtl -> mtl
+```
+python partnet_merge_with_materials.py mesh/partnet mesh/partnet_glb --single 35059
+```
+
 ### 1. 生成voxel的mesh
 处理单个文件
 ```
