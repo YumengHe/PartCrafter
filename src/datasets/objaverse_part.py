@@ -77,8 +77,19 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
             surface_data = np.load(surface_path, allow_pickle=True).item()
             # If parts is empty, the object is the only part
             part_surfaces = surface_data['parts'] if len(surface_data['parts']) > 0 else [surface_data['object']]
+            num_parts = len(part_surfaces)
+
+            # Create part indices for tracking shuffle order
+            part_indices = list(range(num_parts))
+
             if self.shuffle_parts:
-                random.shuffle(part_surfaces)
+                # Shuffle both parts and indices together to maintain correspondence
+                combined = list(zip(part_surfaces, part_indices))
+                random.shuffle(combined)
+                part_surfaces, part_indices = zip(*combined)
+                part_surfaces = list(part_surfaces)
+                part_indices = list(part_indices)
+
             part_surfaces = load_surfaces(part_surfaces) # [N, P, 6]
         else:
             part_surfaces = []
@@ -86,13 +97,43 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
                 surface_data = np.load(surface_path, allow_pickle=True).item()
                 part_surfaces.append(load_surface(surface_data))
             part_surfaces = torch.stack(part_surfaces, dim=0) # [N, P, 6]
-        image_path = data_config['image_path']
-        image = Image.open(image_path).resize(self.image_size)
-        if random.random() < self.rotating_ratio:
-            image = self.transform(image)
-        image = np.array(image)
-        image = torch.from_numpy(image).to(torch.uint8) # [H, W, 3]
-        images = torch.stack([image] * part_surfaces.shape[0], dim=0) # [N, H, W, 3]
+            num_parts = part_surfaces.shape[0]
+            part_indices = list(range(num_parts))
+
+        # Load per-part images
+        # Extract base directory from image_path (remove filename)
+        base_dir = os.path.dirname(data_config['image_path'])
+
+        images = []
+        for i, part_idx in enumerate(part_indices):
+            # Load image for each part: link_0.png, link_1.png, etc.
+            part_image_path = os.path.join(base_dir, f"link_{part_idx}.png")
+
+            if os.path.exists(part_image_path):
+                # Load part-specific image
+                image = Image.open(part_image_path).resize(self.image_size)
+                # Only print debug info for first few samples
+                if self.training and i == 0:  # Only log for first part of each object
+                    print(f"DEBUG: Loading part {i} (original index {part_idx}) image from {part_image_path}")
+            else:
+                # Fallback to global image if part image doesn't exist
+                if self.training:
+                    print(f"WARNING: Part image {part_image_path} not found, using global image")
+                image = Image.open(data_config['image_path']).resize(self.image_size)
+
+            if random.random() < self.rotating_ratio:
+                image = self.transform(image)
+            image = np.array(image)
+            image = torch.from_numpy(image).to(torch.uint8) # [H, W, 3]
+            images.append(image)
+
+        images = torch.stack(images, dim=0) # [N, H, W, 3]
+
+        if self.training:
+            print(f"DEBUG: Loaded {len(images)} images for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
+            print(f"DEBUG: Part indices order: {part_indices}")
+            print(f"DEBUG: Images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}")
+
         return {
             "images": images,
             "part_surfaces": part_surfaces,
@@ -185,10 +226,48 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
     
     def collate_fn(self, batch):
         batch = [data for data in batch if len(data) > 0]
-        images = torch.cat([data['images'] for data in batch], dim=0) # [N, H, W, 3]
-        surfaces = torch.cat([data['part_surfaces'] for data in batch], dim=0) # [N, P, 6]
-        num_parts = torch.LongTensor([data['part_surfaces'].shape[0] for data in batch])
-        assert images.shape[0] == surfaces.shape[0] == num_parts.sum() == self.batch_size
+
+        # Collect all images and part surfaces
+        all_images = []
+        all_surfaces = []
+        num_parts_list = []
+
+        # Initialize a class variable to track batch count for debug output
+        if not hasattr(self, '_debug_batch_count'):
+            self._debug_batch_count = 0
+        self._debug_batch_count += 1
+
+        # Only print debug info for first few batches
+        debug_this_batch = self._debug_batch_count <= 3
+
+        if debug_this_batch:
+            print(f"DEBUG: Collating batch #{self._debug_batch_count} with {len(batch)} objects")
+
+        for obj_idx, data in enumerate(batch):
+            obj_images = data['images']
+            obj_surfaces = data['part_surfaces']
+            obj_num_parts = obj_surfaces.shape[0]
+
+            if debug_this_batch:
+                print(f"DEBUG: Object {obj_idx}: {obj_num_parts} parts, images shape: {obj_images.shape}, surfaces shape: {obj_surfaces.shape}")
+
+            all_images.append(obj_images)
+            all_surfaces.append(obj_surfaces)
+            num_parts_list.append(obj_num_parts)
+
+        images = torch.cat(all_images, dim=0) # [N, H, W, 3]
+        surfaces = torch.cat(all_surfaces, dim=0) # [N, P, 6]
+        num_parts = torch.LongTensor(num_parts_list)
+
+        total_parts = num_parts.sum().item()
+
+        if debug_this_batch:
+            print(f"DEBUG: Final batch - Images: {images.shape}, Surfaces: {surfaces.shape}, Num parts: {num_parts.tolist()}")
+            print(f"DEBUG: Total parts: {total_parts}, Expected batch size: {self.batch_size}")
+
+        assert images.shape[0] == surfaces.shape[0] == total_parts == self.batch_size, \
+            f"Shape mismatch: images={images.shape[0]}, surfaces={surfaces.shape[0]}, total_parts={total_parts}, batch_size={self.batch_size}"
+
         batch = {
             "images": images,
             "part_surfaces": surfaces,
