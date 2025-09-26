@@ -17,7 +17,7 @@ dataset:
   max_num_parts: 8
   max_iou_mean: 1.0
   max_iou_max: 1.0
-  shuffle_parts: true
+  shuffle_parts: false  # IMPORTANT: Must be false when using per-part images to maintain part-image correspondence
   object_ratio: 0.0
   rotating_ratio: 0.0
   rotating_degree: 10

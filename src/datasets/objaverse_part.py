@@ -104,6 +104,11 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
         # Extract base directory from image_path (remove filename)
         base_dir = os.path.dirname(data_config['image_path'])
 
+        # Safety check: warn if shuffle_parts is enabled when using per-part images
+        if self.shuffle_parts and self.training:
+            print("WARNING: shuffle_parts=True may cause part-image mismatch when using per-part images!")
+            print("         Consider setting shuffle_parts=False in config for per-part training.")
+
         images = []
         for i, part_idx in enumerate(part_indices):
             # Load image for each part: link_0.png, link_1.png, etc.
