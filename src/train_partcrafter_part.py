@@ -939,15 +939,27 @@ def log_validation(
             # randomly sample the next batch
             batch = next(random_val_dataloader)
 
-        images = batch["images"]
-        if len(images.shape) == 5:
-            images = images[0] # (1, N, H, W, 3) -> (N, H, W, 3)
-        images = [Image.fromarray(image) for image in images.cpu().numpy()]
+        # Get per-part images for model input
+        per_part_images = batch["images"]
+        if len(per_part_images.shape) == 5:
+            per_part_images = per_part_images[0] # (1, N, H, W, 3) -> (N, H, W, 3)
+        per_part_images = [Image.fromarray(image) for image in per_part_images.cpu().numpy()]
+
+        # Get global image for validation display (human-friendly reference)
+        global_image = batch["global_image"]
+        if len(global_image.shape) == 4:
+            global_image = global_image[0] # (1, H, W, 3) -> (H, W, 3)
+        global_image = Image.fromarray(global_image.cpu().numpy())
+
         part_surfaces = batch["part_surfaces"].cpu().numpy()
         if len(part_surfaces.shape) == 4:
             part_surfaces = part_surfaces[0] # (1, N, P, 6) -> (N, P, 6)
 
-        N = len(images)
+        logger.info(f"Validation step {val_step}: Using per-part images for model input ({len(per_part_images)} parts), global image for display")
+        logger.info(f"Per-part images sizes: {[img.size for img in per_part_images[:3]]}...")  # Log first 3 sizes
+        logger.info(f"Global image size: {global_image.size}")
+
+        N = len(per_part_images)
 
         val_progress_bar.set_postfix(
             {"num_parts": N}
@@ -956,10 +968,10 @@ def log_validation(
         with torch.autocast("cuda", torch.float16):
             for guidance_scale in sorted(args.val_guidance_scales):
                 pred_part_meshes = pipeline(
-                    images, 
+                    per_part_images,  # Use per-part images for model input
                     num_inference_steps=configs['val']['num_inference_steps'],
                     num_tokens=configs['model']['vae']['num_tokens'],
-                    guidance_scale=guidance_scale, 
+                    guidance_scale=guidance_scale,
                     attention_kwargs={"num_parts": N},
                     generator=generator,
                     max_num_expanded_coords=configs['val']['max_num_expanded_coords'],
@@ -971,8 +983,9 @@ def log_validation(
                     local_eval_dir = os.path.join(eval_dir, f"{global_step:06d}", f"guidance_scale_{guidance_scale:.1f}")
                     os.makedirs(local_eval_dir, exist_ok=True)
                     rendered_images_list, rendered_normals_list = [], []
-                    # 1. save the gt image
-                    images[0].save(os.path.join(local_eval_dir, f"{val_step:04d}.png"))
+                    # 1. save the gt image (now using global image for human-friendly reference)
+                    global_image.save(os.path.join(local_eval_dir, f"{val_step:04d}.png"))
+                    logger.info(f"Saved global reference image for validation step {val_step}")
                     # 2. save the generated part meshes
                     for n in range(N):
                         if pred_part_meshes[n] is None:
@@ -1004,7 +1017,7 @@ def log_validation(
                     rendered_images_list.append(rendered_images)
                     rendered_normals_list.append(rendered_normals)
 
-                    medias_dictlist[f"guidance_scale_{guidance_scale:.1f}/gt_image"] += [images[0]] # List[Image.Image] TODO: support batch size > 1
+                    medias_dictlist[f"guidance_scale_{guidance_scale:.1f}/gt_image"] += [global_image] # List[Image.Image] - now using global image for reference
                     medias_dictlist[f"guidance_scale_{guidance_scale:.1f}/pred_rendered_images"] += rendered_images_list # List[List[Image.Image]]
                     medias_dictlist[f"guidance_scale_{guidance_scale:.1f}/pred_rendered_normals"] += rendered_normals_list # List[List[Image.Image]]
 

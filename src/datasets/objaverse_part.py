@@ -134,15 +134,29 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
 
         images = torch.stack(images, dim=0) # [N, H, W, 3]
 
+        result = {
+            "images": images,           # Per-part images [N, H, W, 3] - for model input
+            "part_surfaces": part_surfaces,
+        }
+
+        # Load global image for validation display (human-friendly reference) - only for validation
+        if not self.training:
+            global_image = Image.open(data_config['image_path']).resize(self.image_size)
+            if random.random() < self.rotating_ratio:
+                global_image = self.transform(global_image)
+            global_image = np.array(global_image)
+            global_image = torch.from_numpy(global_image).to(torch.uint8) # [H, W, 3]
+            result["global_image"] = global_image  # Global image [H, W, 3] - for validation display
+
         if self.training:
             print(f"DEBUG: Loaded {len(images)} images for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
             print(f"DEBUG: Part indices order: {part_indices}")
             print(f"DEBUG: Images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}")
+        else:
+            print(f"DEBUG: Validation - Loaded {len(images)} per-part images + 1 global image")
+            print(f"DEBUG: Global image shape: {result['global_image'].shape}")
 
-        return {
-            "images": images,
-            "part_surfaces": part_surfaces,
-        }
+        return result
     
     def __getitem__(self, idx: int):
         # The dataset can only support batchsize == 1 training. 
