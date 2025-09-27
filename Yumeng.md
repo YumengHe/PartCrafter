@@ -22,10 +22,10 @@ python voxel_surface.py mesh/glb_part -r 200
 ```
 处理subfolder
 ```
-python voxel_surface.py mesh/partnet_glb --subfolder -r 100
+python voxel_surface.py mesh/partnet_glb --subfolder -r 200
 ```
 
 ### 3. 根据PartCrafter的要求预处理partnet-mobility
 ```
-CUDA_VISIBLE_DEVICES=7 python datasets/preprocess/preprocess_partnet.py --input mesh/partnet_glb --output preprocessed_data
+CUDA_VISIBLE_DEVICES=0 python datasets/preprocess/preprocess_partnet.py --input mesh/partnet_glb --output preprocessed_data
 ```

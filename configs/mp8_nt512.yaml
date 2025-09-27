@@ -37,7 +37,7 @@ lr_scheduler:
 
 train:
   batch_size_per_gpu: 12
-  epochs: 200
+  epochs: 100
   grad_checkpoint: true
   weighting_scheme: "logit_normal"
   logit_mean: 0.0
