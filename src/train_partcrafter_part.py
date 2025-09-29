@@ -670,7 +670,7 @@ def main():
                 logger.info(f"[Step {global_update_step:06d}] Per-part image embeds shape: {image_embeds.shape}")
 
             # ====== Global images -> DINOv2 embeds ======
-            global_images = batch["global_images"]  # [M, H, W, 3] - one global image per object
+            global_images = batch["global_images"]  # [N, H, W, 3] - global image replicated per part
 
             if debug_this_step:
                 logger.info(f"[Step {global_update_step:06d}] Global images shape: {global_images.shape}")
@@ -681,13 +681,22 @@ def main():
             global_pixel_values = global_pixel_values.to(device=accelerator.device, dtype=weight_dtype)
 
             with torch.no_grad():
-                global_image_embeds = image_encoder_dinov2(global_pixel_values).last_hidden_state   # [M, L, C]
-            negative_global_image_embeds = torch.zeros_like(global_image_embeds)                    # [M, L, C]
+                global_image_embeds = image_encoder_dinov2(global_pixel_values).last_hidden_state   # [N, L, C]
+            negative_global_image_embeds = torch.zeros_like(global_image_embeds)                    # [N, L, C]
 
-            # Expand global image embeds to match per-part structure
-            # Each part from the same object should use the same global image embedding
-            expanded_global_image_embeds = global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
-            expanded_negative_global_image_embeds = negative_global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
+            # Check if global_image_embeds already has the correct size (sum of num_parts)
+            if global_image_embeds.shape[0] == total_parts:
+                # Already aligned, no need to repeat_interleave
+                expanded_global_image_embeds = global_image_embeds  # [N, L, C]
+                expanded_negative_global_image_embeds = negative_global_image_embeds  # [N, L, C]
+                if debug_this_step:
+                    logger.info(f"[Step {global_update_step:06d}] Global image embeds already aligned, no broadcasting needed")
+            else:
+                # Need to broadcast from [M, L, C] to [N, L, C]
+                expanded_global_image_embeds = global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
+                expanded_negative_global_image_embeds = negative_global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
+                if debug_this_step:
+                    logger.info(f"[Step {global_update_step:06d}] Broadcasting global image embeds from {global_image_embeds.shape} to {expanded_global_image_embeds.shape}")
 
             if debug_this_step:
                 logger.info(f"[Step {global_update_step:06d}] Global image embeds shape: {global_image_embeds.shape}")
@@ -976,11 +985,16 @@ def log_validation(
             per_part_images = per_part_images[0] # (1, N, H, W, 3) -> (N, H, W, 3)
         per_part_images = [Image.fromarray(image) for image in per_part_images.cpu().numpy()]
 
-        # Get global image for validation display (human-friendly reference)
-        global_image = batch["global_image"]
-        if len(global_image.shape) == 4:
-            global_image = global_image[0] # (1, H, W, 3) -> (H, W, 3)
-        global_image = Image.fromarray(global_image.cpu().numpy())
+        # Get global images - now replicated per part [N, H, W, 3]
+        global_images = batch["global_images"]
+        if len(global_images.shape) == 5:
+            global_images = global_images[0] # (1, N, H, W, 3) -> (N, H, W, 3)
+
+        # For validation display, use the first global image (they're all the same)
+        global_image = Image.fromarray(global_images[0].cpu().numpy())
+
+        # Convert global images to PIL format for pipeline
+        global_images_pil = [Image.fromarray(image) for image in global_images.cpu().numpy()]
 
         part_surfaces = batch["part_surfaces"].cpu().numpy()
         if len(part_surfaces.shape) == 4:
@@ -1000,7 +1014,7 @@ def log_validation(
             for guidance_scale in sorted(args.val_guidance_scales):
                 pred_part_meshes = pipeline(
                     image=per_part_images,  # For backward compatibility
-                    global_image=global_image,  # Global image for global attention layers
+                    global_image=global_images_pil,  # Global images replicated per part for global attention layers
                     local_images=per_part_images,  # Per-part images for local attention layers
                     num_inference_steps=configs['val']['num_inference_steps'],
                     num_tokens=configs['model']['vae']['num_tokens'],
