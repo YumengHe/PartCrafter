@@ -248,6 +248,10 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
                 local_images, device, num_images_per_prompt
             )
 
+        # For backward compatibility, set image_embeds to local_image_embeds at the beginning
+        image_embeds = local_image_embeds
+        negative_image_embeds = local_negative_image_embeds
+
         # Handle dimension mismatch: if global_image is single but local_images are multiple,
         # expand global image embeds to match local images dimensions
         if global_image_embeds is not None and local_image_embeds is not None:
@@ -261,15 +265,17 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
                     # This case shouldn't happen in normal usage, but handle it for completeness
                     local_image_embeds = local_image_embeds.repeat(global_image_embeds.shape[0], 1, 1)
                     local_negative_image_embeds = local_negative_image_embeds.repeat(global_image_embeds.shape[0], 1, 1)
+                    # Update backward compatibility variables
+                    image_embeds = local_image_embeds
+                    negative_image_embeds = local_negative_image_embeds
                 else:
                     raise ValueError(f"Dimension mismatch between global_image ({global_image_embeds.shape[0]}) and local_images ({local_image_embeds.shape[0]})")
 
-        # For backward compatibility, set image_embeds to local_image_embeds
-        image_embeds = local_image_embeds
-        negative_image_embeds = local_negative_image_embeds
 
         # Verify dimension consistency for debugging
         if global_image_embeds is not None and local_image_embeds is not None:
+            print(f"DEBUG Pipeline: Global image embeds shape: {global_image_embeds.shape}")
+            print(f"DEBUG Pipeline: Local image embeds shape: {local_image_embeds.shape}")
             assert global_image_embeds.shape[0] == local_image_embeds.shape[0], \
                 f"Global and local image embeds dimension mismatch: global={global_image_embeds.shape}, local={local_image_embeds.shape}"
 
@@ -279,6 +285,13 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
                 global_image_embeds = torch.cat([global_negative_image_embeds, global_image_embeds], dim=0)
             if local_image_embeds is not None:
                 local_image_embeds = torch.cat([local_negative_image_embeds, local_image_embeds], dim=0)
+
+            # Debug CFG shapes
+            if global_image_embeds is not None and local_image_embeds is not None:
+                print(f"DEBUG Pipeline CFG: Global image embeds shape after CFG: {global_image_embeds.shape}")
+                print(f"DEBUG Pipeline CFG: Local image embeds shape after CFG: {local_image_embeds.shape}")
+                assert global_image_embeds.shape[0] == local_image_embeds.shape[0], \
+                    f"CFG: Global and local image embeds dimension mismatch: global={global_image_embeds.shape}, local={local_image_embeds.shape}"
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
