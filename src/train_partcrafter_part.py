@@ -684,19 +684,13 @@ def main():
                 global_image_embeds = image_encoder_dinov2(global_pixel_values).last_hidden_state   # [N, L, C]
             negative_global_image_embeds = torch.zeros_like(global_image_embeds)                    # [N, L, C]
 
-            # Check if global_image_embeds already has the correct size (sum of num_parts)
-            if global_image_embeds.shape[0] == total_parts:
-                # Already aligned, no need to repeat_interleave
-                expanded_global_image_embeds = global_image_embeds  # [N, L, C]
-                expanded_negative_global_image_embeds = negative_global_image_embeds  # [N, L, C]
-                if debug_this_step:
-                    logger.info(f"[Step {global_update_step:06d}] Global image embeds already aligned, no broadcasting needed")
-            else:
-                # Need to broadcast from [M, L, C] to [N, L, C]
-                expanded_global_image_embeds = global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
-                expanded_negative_global_image_embeds = negative_global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
-                if debug_this_step:
-                    logger.info(f"[Step {global_update_step:06d}] Broadcasting global image embeds from {global_image_embeds.shape} to {expanded_global_image_embeds.shape}")
+            # Global images are now already replicated per part in the dataset, so no broadcasting needed
+            expanded_global_image_embeds = global_image_embeds  # [N, L, C]
+            expanded_negative_global_image_embeds = negative_global_image_embeds  # [N, L, C]
+
+            if debug_this_step:
+                logger.info(f"[Step {global_update_step:06d}] Global image embeds shape: {global_image_embeds.shape}, total_parts: {total_parts}")
+                logger.info(f"[Step {global_update_step:06d}] Global images already aligned per part, no broadcasting needed")
 
             if debug_this_step:
                 logger.info(f"[Step {global_update_step:06d}] Global image embeds shape: {global_image_embeds.shape}")
