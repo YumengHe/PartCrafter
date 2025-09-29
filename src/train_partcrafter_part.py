@@ -667,7 +667,34 @@ def main():
             negative_image_embeds = torch.zeros_like(image_embeds)                    # [N, L, C]
 
             if debug_this_step:
-                logger.info(f"[Step {global_update_step:06d}] Image embeds shape: {image_embeds.shape}")
+                logger.info(f"[Step {global_update_step:06d}] Per-part image embeds shape: {image_embeds.shape}")
+
+            # ====== Global images -> DINOv2 embeds ======
+            global_images = batch["global_images"]  # [M, H, W, 3] - one global image per object
+
+            if debug_this_step:
+                logger.info(f"[Step {global_update_step:06d}] Global images shape: {global_images.shape}")
+
+            # Process global images
+            with torch.no_grad():
+                global_pixel_values = feature_extractor_dinov2(images=global_images, return_tensors="pt").pixel_values
+            global_pixel_values = global_pixel_values.to(device=accelerator.device, dtype=weight_dtype)
+
+            with torch.no_grad():
+                global_image_embeds = image_encoder_dinov2(global_pixel_values).last_hidden_state   # [M, L, C]
+            negative_global_image_embeds = torch.zeros_like(global_image_embeds)                    # [M, L, C]
+
+            # Expand global image embeds to match per-part structure
+            # Each part from the same object should use the same global image embedding
+            expanded_global_image_embeds = global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
+            expanded_negative_global_image_embeds = negative_global_image_embeds.repeat_interleave(num_parts, dim=0)  # [N, L, C]
+
+            if debug_this_step:
+                logger.info(f"[Step {global_update_step:06d}] Global image embeds shape: {global_image_embeds.shape}")
+                logger.info(f"[Step {global_update_step:06d}] Expanded global image embeds shape: {expanded_global_image_embeds.shape}")
+                logger.info(f"[Step {global_update_step:06d}] Per-part image embeds shape: {image_embeds.shape}")
+                logger.info(f"[Step {global_update_step:06d}] Dimension consistency check: global={expanded_global_image_embeds.shape}, local={image_embeds.shape}")
+                assert expanded_global_image_embeds.shape[0] == image_embeds.shape[0], f"Dimension mismatch: global={expanded_global_image_embeds.shape[0]}, local={image_embeds.shape[0]}"
 
             # ====== Part surfaces（与你现有一致）======
             part_surfaces = batch["part_surfaces"]          # [N, P, 6]
@@ -715,16 +742,20 @@ def main():
             #     if dropout_mask.any():
             #         image_embeds[dropout_mask] = negative_image_embeds[dropout_mask]
             if configs["train"]["cfg_dropout_prob"] > 0:
-                # 按“物体”决定是否把所有该物体的 part 图像嵌入替换为负样本
+                # 按"物体"决定是否把所有该物体的 part 图像嵌入替换为负样本
                 object_keep_mask = torch.rand(num_objects, device=accelerator.device) >= configs["train"]["cfg_dropout_prob"]  # True=保留
                 part_keep_mask   = object_keep_mask[obj_ids]  # [N] 映射到每个part
                 if (~part_keep_mask).any():
+                    # Apply CFG dropout to both local and global image embeds
                     image_embeds[~part_keep_mask] = negative_image_embeds[~part_keep_mask]
+                    expanded_global_image_embeds[~part_keep_mask] = expanded_negative_global_image_embeds[~part_keep_mask]
 
             model_pred = transformer(
                 hidden_states=latent_model_input,
                 timestep=timesteps,
-                encoder_hidden_states=image_embeds, 
+                encoder_hidden_states=image_embeds,  # For backward compatibility
+                global_encoder_hidden_states=expanded_global_image_embeds,  # Global images for global attention layers
+                local_encoder_hidden_states=image_embeds,  # Per-part images for local attention layers
                 attention_kwargs={"num_parts": num_parts}
             ).sample
 
@@ -968,7 +999,9 @@ def log_validation(
         with torch.autocast("cuda", torch.float16):
             for guidance_scale in sorted(args.val_guidance_scales):
                 pred_part_meshes = pipeline(
-                    per_part_images,  # Use per-part images for model input
+                    image=per_part_images,  # For backward compatibility
+                    global_image=global_image,  # Global image for global attention layers
+                    local_images=per_part_images,  # Per-part images for local attention layers
                     num_inference_steps=configs['val']['num_inference_steps'],
                     num_tokens=configs['model']['vae']['num_tokens'],
                     guidance_scale=guidance_scale,

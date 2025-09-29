@@ -621,12 +621,14 @@ class PartCrafterDiTModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         hidden_states: Optional[torch.Tensor],
         timestep: Union[int, float, torch.LongTensor],
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        global_encoder_hidden_states: Optional[torch.Tensor] = None,
+        local_encoder_hidden_states: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ):
         """
-        The [`HunyuanDiT2DModel`] forward method.
+        The [`PartCrafterDiTModel`] forward method.
 
         Args:
         hidden_states (`torch.Tensor` of shape `(batch size, dim, height, width)`):
@@ -634,7 +636,11 @@ class PartCrafterDiTModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         timestep ( `torch.LongTensor`, *optional*):
             Used to indicate denoising step.
         encoder_hidden_states ( `torch.Tensor` of shape `(batch size, sequence len, embed dims)`, *optional*):
-            Conditional embeddings for cross attention layer.
+            Conditional embeddings for cross attention layer (deprecated, use global_encoder_hidden_states and local_encoder_hidden_states).
+        global_encoder_hidden_states ( `torch.Tensor` of shape `(batch size, sequence len, embed dims)`, *optional*):
+            Conditional embeddings for global attention layers.
+        local_encoder_hidden_states ( `torch.Tensor` of shape `(batch size, sequence len, embed dims)`, *optional*):
+            Conditional embeddings for local attention layers.
         return_dict: bool
             Whether to return a dictionary.
         """
@@ -685,30 +691,34 @@ class PartCrafterDiTModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 )
             hidden_states = hidden_states + part_embedding.unsqueeze(dim=1) # (N, T+1, D)
 
+        # Handle backward compatibility and prepare encoder hidden states
+        if global_encoder_hidden_states is None and local_encoder_hidden_states is None:
+            # Backward compatibility: use encoder_hidden_states for both global and local
+            global_encoder_hidden_states = encoder_hidden_states
+            local_encoder_hidden_states = encoder_hidden_states
+
         # prepare negative encoder_hidden_states
-        negative_encoder_hidden_states = torch.zeros_like(encoder_hidden_states) if encoder_hidden_states is not None else None
+        negative_global_encoder_hidden_states = torch.zeros_like(global_encoder_hidden_states) if global_encoder_hidden_states is not None else None
+        negative_local_encoder_hidden_states = torch.zeros_like(local_encoder_hidden_states) if local_encoder_hidden_states is not None else None
 
         skips = []
         for layer, block in enumerate(self.blocks):
             skip = None if layer <= self.config.num_layers // 2 else skips.pop()
-            if (
-                (not self.enable_local_cross_attn) 
-                and len(self.global_attn_block_ids) > 0
-                and (layer not in self.global_attn_block_ids)
-            ):
-                # If in non-global attention block and disable local cross attention, use negative encoder_hidden_states
-                # Do not inject control signal into non-global attention block
-                input_encoder_hidden_states = negative_encoder_hidden_states
-            elif (
-                (not self.enable_global_cross_attn)
-                and len(self.global_attn_block_ids) > 0
-                and (layer in self.global_attn_block_ids)
-            ):
-                # If in global attention block and disable global cross attention, use negative encoder_hidden_states
-                # Do not inject control signal into global attention block
-                input_encoder_hidden_states = negative_encoder_hidden_states
+            # Select encoder hidden states based on whether this is a global or local attention layer
+            if len(self.global_attn_block_ids) > 0 and (layer in self.global_attn_block_ids):
+                # This is a global attention block
+                if self.enable_global_cross_attn:
+                    input_encoder_hidden_states = global_encoder_hidden_states
+                else:
+                    # Disable global cross attention, use negative encoder_hidden_states
+                    input_encoder_hidden_states = negative_global_encoder_hidden_states
             else:
-                input_encoder_hidden_states = encoder_hidden_states
+                # This is a local attention block
+                if self.enable_local_cross_attn:
+                    input_encoder_hidden_states = local_encoder_hidden_states
+                else:
+                    # Disable local cross attention, use negative encoder_hidden_states
+                    input_encoder_hidden_states = negative_local_encoder_hidden_states
             
             if len(self.global_attn_block_ids) > 0 and (layer in self.global_attn_block_ids):
                 # Inject control signal into global attention block

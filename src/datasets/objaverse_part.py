@@ -139,22 +139,21 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
             "part_surfaces": part_surfaces,
         }
 
-        # Load global image for validation display (human-friendly reference) - only for validation
-        if not self.training:
-            global_image = Image.open(data_config['image_path']).resize(self.image_size)
-            if random.random() < self.rotating_ratio:
-                global_image = self.transform(global_image)
-            global_image = np.array(global_image)
-            global_image = torch.from_numpy(global_image).to(torch.uint8) # [H, W, 3]
-            result["global_image"] = global_image  # Global image [H, W, 3] - for validation display
+        # Load global image - for validation display and global attention during training
+        global_image = Image.open(data_config['image_path']).resize(self.image_size)
+        if random.random() < self.rotating_ratio:
+            global_image = self.transform(global_image)
+        global_image = np.array(global_image)
+        global_image = torch.from_numpy(global_image).to(torch.uint8) # [H, W, 3]
+        result["global_image"] = global_image  # Global image [H, W, 3] - for global attention and validation display
 
         if self.training:
-            print(f"DEBUG: Loaded {len(images)} images for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
+            print(f"DEBUG: Training - Loaded {len(images)} per-part images + 1 global image for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
             print(f"DEBUG: Part indices order: {part_indices}")
-            print(f"DEBUG: Images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}")
+            print(f"DEBUG: Per-part images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}, Global image shape: {global_image.shape}")
         else:
             print(f"DEBUG: Validation - Loaded {len(images)} per-part images + 1 global image")
-            print(f"DEBUG: Global image shape: {result['global_image'].shape}")
+            print(f"DEBUG: Per-part images shape: {images.shape}, Global image shape: {result['global_image'].shape}")
 
         return result
     
@@ -248,6 +247,7 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
 
         # Collect all images and part surfaces
         all_images = []
+        all_global_images = []
         all_surfaces = []
         num_parts_list = []
 
@@ -264,31 +264,37 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
 
         for obj_idx, data in enumerate(batch):
             obj_images = data['images']
+            obj_global_image = data['global_image']
             obj_surfaces = data['part_surfaces']
             obj_num_parts = obj_surfaces.shape[0]
 
             if debug_this_batch:
-                print(f"DEBUG: Object {obj_idx}: {obj_num_parts} parts, images shape: {obj_images.shape}, surfaces shape: {obj_surfaces.shape}")
+                print(f"DEBUG: Object {obj_idx}: {obj_num_parts} parts, per-part images shape: {obj_images.shape}, global image shape: {obj_global_image.shape}, surfaces shape: {obj_surfaces.shape}")
 
             all_images.append(obj_images)
+            all_global_images.append(obj_global_image)
             all_surfaces.append(obj_surfaces)
             num_parts_list.append(obj_num_parts)
 
-        images = torch.cat(all_images, dim=0) # [N, H, W, 3]
+        images = torch.cat(all_images, dim=0) # [N, H, W, 3] - per-part images
+        global_images = torch.stack(all_global_images, dim=0) # [B, H, W, 3] - global images
         surfaces = torch.cat(all_surfaces, dim=0) # [N, P, 6]
         num_parts = torch.LongTensor(num_parts_list)
 
         total_parts = num_parts.sum().item()
 
         if debug_this_batch:
-            print(f"DEBUG: Final batch - Images: {images.shape}, Surfaces: {surfaces.shape}, Num parts: {num_parts.tolist()}")
+            print(f"DEBUG: Final batch - Per-part images: {images.shape}, Global images: {global_images.shape}, Surfaces: {surfaces.shape}, Num parts: {num_parts.tolist()}")
             print(f"DEBUG: Total parts: {total_parts}, Expected batch size: {self.batch_size}")
 
         assert images.shape[0] == surfaces.shape[0] == total_parts == self.batch_size, \
-            f"Shape mismatch: images={images.shape[0]}, surfaces={surfaces.shape[0]}, total_parts={total_parts}, batch_size={self.batch_size}"
+            f"Shape mismatch: per-part images={images.shape[0]}, surfaces={surfaces.shape[0]}, total_parts={total_parts}, batch_size={self.batch_size}"
+        assert global_images.shape[0] == len(batch), \
+            f"Global images batch mismatch: global_images={global_images.shape[0]}, num_objects={len(batch)}"
 
         batch = {
-            "images": images,
+            "images": images,                # Per-part images [N, H, W, 3] for local attention
+            "global_images": global_images,  # Global images [B, H, W, 3] for global attention
             "part_surfaces": surfaces,
             "num_parts": num_parts,
         }

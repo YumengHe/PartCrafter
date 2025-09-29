@@ -176,7 +176,9 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
     @torch.no_grad()
     def __call__(
         self,
-        image: PipelineImageInput,
+        image: PipelineImageInput = None,
+        global_image: PipelineImageInput = None,
+        local_images: PipelineImageInput = None,
         num_inference_steps: int = 50,
         num_tokens: int = 2048,
         timesteps: List[int] = None,
@@ -188,7 +190,7 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         bounds: Union[Tuple[float], List[float], float] = (-1.005, -1.005, -1.005, 1.005, 1.005, 1.005),
-        dense_octree_depth: int = 8, 
+        dense_octree_depth: int = 8,
         hierarchical_octree_depth: int = 9,
         max_num_expanded_coords: int = 1e8,
         flash_octree_depth: int = 9,
@@ -200,26 +202,83 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
         self._attention_kwargs = attention_kwargs
         self._interrupt = False
 
-        # 2. Define call parameters
-        if isinstance(image, PIL.Image.Image):
-            batch_size = 1
-        elif isinstance(image, list):
-            batch_size = len(image)
-        elif isinstance(image, torch.Tensor):
-            batch_size = image.shape[0]
+        # 2. Handle backward compatibility and determine batch size
+        if global_image is None and local_images is None:
+            # Backward compatibility: use image parameter for both global and local
+            global_image = image
+            local_images = image
+
+        if global_image is not None:
+            if isinstance(global_image, PIL.Image.Image):
+                batch_size = 1
+            elif isinstance(global_image, list):
+                batch_size = len(global_image)
+            elif isinstance(global_image, torch.Tensor):
+                batch_size = global_image.shape[0]
+            else:
+                raise ValueError("Invalid input type for global_image")
+        elif local_images is not None:
+            if isinstance(local_images, PIL.Image.Image):
+                batch_size = 1
+            elif isinstance(local_images, list):
+                batch_size = len(local_images)
+            elif isinstance(local_images, torch.Tensor):
+                batch_size = local_images.shape[0]
+            else:
+                raise ValueError("Invalid input type for local_images")
         else:
-            raise ValueError("Invalid input type for image")
+            raise ValueError("Either global_image or local_images must be provided")
 
         device = self._execution_device
         dtype = self.image_encoder_dinov2.dtype
 
-        # 3. Encode condition
-        image_embeds, negative_image_embeds = self.encode_image(
-            image, device, num_images_per_prompt
-        )
+        # 3. Encode conditions separately
+        global_image_embeds = None
+        global_negative_image_embeds = None
+        local_image_embeds = None
+        local_negative_image_embeds = None
+
+        if global_image is not None:
+            global_image_embeds, global_negative_image_embeds = self.encode_image(
+                global_image, device, num_images_per_prompt
+            )
+
+        if local_images is not None:
+            local_image_embeds, local_negative_image_embeds = self.encode_image(
+                local_images, device, num_images_per_prompt
+            )
+
+        # Handle dimension mismatch: if global_image is single but local_images are multiple,
+        # expand global image embeds to match local images dimensions
+        if global_image_embeds is not None and local_image_embeds is not None:
+            if global_image_embeds.shape[0] != local_image_embeds.shape[0]:
+                if global_image_embeds.shape[0] == 1 and local_image_embeds.shape[0] > 1:
+                    # Expand single global image to match multiple local images
+                    num_local_images = local_image_embeds.shape[0]
+                    global_image_embeds = global_image_embeds.repeat(num_local_images, 1, 1)
+                    global_negative_image_embeds = global_negative_image_embeds.repeat(num_local_images, 1, 1)
+                elif global_image_embeds.shape[0] > 1 and local_image_embeds.shape[0] == 1:
+                    # This case shouldn't happen in normal usage, but handle it for completeness
+                    local_image_embeds = local_image_embeds.repeat(global_image_embeds.shape[0], 1, 1)
+                    local_negative_image_embeds = local_negative_image_embeds.repeat(global_image_embeds.shape[0], 1, 1)
+                else:
+                    raise ValueError(f"Dimension mismatch between global_image ({global_image_embeds.shape[0]}) and local_images ({local_image_embeds.shape[0]})")
+
+        # For backward compatibility, set image_embeds to local_image_embeds
+        image_embeds = local_image_embeds
+        negative_image_embeds = local_negative_image_embeds
+
+        # Verify dimension consistency for debugging
+        if global_image_embeds is not None and local_image_embeds is not None:
+            assert global_image_embeds.shape[0] == local_image_embeds.shape[0], \
+                f"Global and local image embeds dimension mismatch: global={global_image_embeds.shape}, local={local_image_embeds.shape}"
 
         if self.do_classifier_free_guidance:
             image_embeds = torch.cat([negative_image_embeds, image_embeds], dim=0)
+            if global_image_embeds is not None:
+                global_image_embeds = torch.cat([global_negative_image_embeds, global_image_embeds], dim=0)
+            if local_image_embeds is not None:
+                local_image_embeds = torch.cat([local_negative_image_embeds, local_image_embeds], dim=0)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -266,6 +325,8 @@ class PartCrafterPipeline(DiffusionPipeline, TransformerDiffusionMixin):
                     latent_model_input,
                     timestep,
                     encoder_hidden_states=image_embeds,
+                    global_encoder_hidden_states=global_image_embeds,
+                    local_encoder_hidden_states=local_image_embeds,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0].to(dtype)
