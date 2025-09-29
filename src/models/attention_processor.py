@@ -462,11 +462,15 @@ class PartCrafterAttnProcessor:
                 batch_size, channel, height * width
             ).transpose(1, 2)
 
-        batch_size, sequence_length, _ = (
-            hidden_states.shape
-            if encoder_hidden_states is None
-            else encoder_hidden_states.shape
-        )
+        # Always use hidden_states dimensions for batch_size calculation to avoid CFG mismatch
+        # The encoder_hidden_states might have different batch size due to CFG concatenation
+        batch_size, sequence_length, _ = hidden_states.shape
+
+        # If we have encoder_hidden_states, get its sequence length for cross-attention
+        if encoder_hidden_states is not None:
+            _, encoder_sequence_length, _ = encoder_hidden_states.shape
+        else:
+            encoder_sequence_length = sequence_length
 
         if attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(
