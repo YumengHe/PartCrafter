@@ -145,15 +145,18 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
             global_image = self.transform(global_image)
         global_image = np.array(global_image)
         global_image = torch.from_numpy(global_image).to(torch.uint8) # [H, W, 3]
-        result["global_image"] = global_image  # Global image [H, W, 3] - for global attention and validation display
+
+        # Replicate global image to match part images dimensions: [H, W, 3] -> [N, H, W, 3]
+        global_image = global_image.unsqueeze(0).repeat(num_parts, 1, 1, 1) # [N, H, W, 3]
+        result["global_image"] = global_image  # Global image [N, H, W, 3] - aligned with per-part images
 
         if self.training:
-            print(f"DEBUG: Training - Loaded {len(images)} per-part images + 1 global image for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
+            print(f"DEBUG: Training - Loaded {len(images)} per-part images + {num_parts} replicated global images for {num_parts} parts, shuffle_parts={self.shuffle_parts}")
             print(f"DEBUG: Part indices order: {part_indices}")
-            print(f"DEBUG: Per-part images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}, Global image shape: {global_image.shape}")
+            print(f"DEBUG: Per-part images shape: {images.shape}, Part surfaces shape: {part_surfaces.shape}, Global images shape: {global_image.shape}")
         else:
-            print(f"DEBUG: Validation - Loaded {len(images)} per-part images + 1 global image")
-            print(f"DEBUG: Per-part images shape: {images.shape}, Global image shape: {result['global_image'].shape}")
+            print(f"DEBUG: Validation - Loaded {len(images)} per-part images + {num_parts} replicated global images")
+            print(f"DEBUG: Per-part images shape: {images.shape}, Global images shape: {result['global_image'].shape}")
 
         return result
     
@@ -277,7 +280,7 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
             num_parts_list.append(obj_num_parts)
 
         images = torch.cat(all_images, dim=0) # [N, H, W, 3] - per-part images
-        global_images = torch.stack(all_global_images, dim=0) # [B, H, W, 3] - global images
+        global_images = torch.cat(all_global_images, dim=0) # [N, H, W, 3] - global images (replicated per part)
         surfaces = torch.cat(all_surfaces, dim=0) # [N, P, 6]
         num_parts = torch.LongTensor(num_parts_list)
 
@@ -289,12 +292,12 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
 
         assert images.shape[0] == surfaces.shape[0] == total_parts == self.batch_size, \
             f"Shape mismatch: per-part images={images.shape[0]}, surfaces={surfaces.shape[0]}, total_parts={total_parts}, batch_size={self.batch_size}"
-        assert global_images.shape[0] == len(batch), \
-            f"Global images batch mismatch: global_images={global_images.shape[0]}, num_objects={len(batch)}"
+        assert global_images.shape[0] == images.shape[0] == total_parts == self.batch_size, \
+            f"Global images batch mismatch: global_images={global_images.shape[0]}, per-part images={images.shape[0]}, total_parts={total_parts}, batch_size={self.batch_size}"
 
         batch = {
             "images": images,                # Per-part images [N, H, W, 3] for local attention
-            "global_images": global_images,  # Global images [B, H, W, 3] for global attention
+            "global_images": global_images,  # Global images [N, H, W, 3] for global attention (replicated per part)
             "part_surfaces": surfaces,
             "num_parts": num_parts,
         }
