@@ -670,7 +670,7 @@ def main():
                 logger.info(f"[Step {global_update_step:06d}] Per-part image embeds shape: {image_embeds.shape}")
 
             # ====== Global images -> DINOv2 embeds ======
-            global_images = batch["global_images"]  # [N, H, W, 3] - global image replicated per part
+            global_images = batch["global_image"]  # [N, H, W, 3] - global image replicated per part
 
             if debug_this_step:
                 logger.info(f"[Step {global_update_step:06d}] Global images shape: {global_images.shape}")
@@ -980,7 +980,7 @@ def log_validation(
         per_part_images = [Image.fromarray(image) for image in per_part_images.cpu().numpy()]
 
         # Get global images - now replicated per part [N, H, W, 3]
-        global_images = batch["global_images"]
+        global_images = batch["global_image"]
         if len(global_images.shape) == 5:
             global_images = global_images[0] # (1, N, H, W, 3) -> (N, H, W, 3)
 

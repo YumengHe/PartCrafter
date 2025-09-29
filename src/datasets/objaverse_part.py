@@ -297,7 +297,7 @@ class BatchedObjaversePartDataset(ObjaversePartDataset):
 
         batch = {
             "images": images,                # Per-part images [N, H, W, 3] for local attention
-            "global_images": global_images,  # Global images [N, H, W, 3] for global attention (replicated per part)
+            "global_image": global_images,   # Global images [N, H, W, 3] for global attention (replicated per part)
             "part_surfaces": surfaces,
             "num_parts": num_parts,
         }
