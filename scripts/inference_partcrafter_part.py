@@ -1,8 +1,9 @@
 """
 PartCrafter Per-Part Images Inference Script
 
-This script performs inference using PartCrafter with per-part images.
-Instead of using a single global image for all parts, it uses individual images for each part.
+This script performs inference using PartCrafter with per-part images and optional global image.
+It uses individual images for each part (local attention) and optionally a global image for global attention.
+If no global image (rendering.png) is provided, it falls back to using per-part images for both attentions.
 
 Usage:
     python scripts/inference_partcrafter_part.py \
@@ -13,12 +14,14 @@ Usage:
 
 Expected folder structure:
     /path/to/part/images/
-    ├── link_0.png  # Image for part 0
-    ├── link_1.png  # Image for part 1
-    ├── link_2.png  # Image for part 2
+    ├── rendering.png  # Global image for global attention
+    ├── link_0.png     # Image for part 0
+    ├── link_1.png     # Image for part 1
+    ├── link_2.png     # Image for part 2
     └── ...
 
-The number of image files (link_0.png to link_{num_parts-1}.png) must exactly match the --num_parts argument.
+The number of part image files (link_0.png to link_{num_parts-1}.png) must exactly match the --num_parts argument.
+The global image (rendering.png) is optional but recommended for better results.
 
 Output structure:
     ./results/{timestamp}/
@@ -26,9 +29,10 @@ Output structure:
     ├── part_01.glb
     ├── part_02.glb
     ├── object.glb               # Merged colored mesh
-    ├── input_part_00.png        # Copy of input images for reference
+    ├── input_part_00.png        # Copy of input part images for reference
     ├── input_part_01.png
     ├── input_part_02.png
+    ├── input_global.png         # Copy of global image for reference (if provided)
     ├── rendering.gif            # Rendered animation (if --render)
     ├── rendering_normal.gif     # Normal rendering animation
     ├── rendering_grid.gif       # Grid rendering animation
@@ -102,6 +106,42 @@ def load_per_part_images(image_folder: str, num_parts: int, rmbg_net: Any = None
     print(f"DEBUG: Successfully loaded all {len(part_images)} part images")
     return part_images
 
+def load_global_image(image_folder: str, num_parts: int, rmbg_net: Any = None, rmbg: bool = False) -> list:
+    """
+    Load global image (rendering.png) and replicate it for each part.
+
+    Args:
+        image_folder: Path to folder containing images
+        num_parts: Number of parts (for replication)
+        rmbg_net: Background removal network (optional)
+        rmbg: Whether to apply background removal
+
+    Returns:
+        List of PIL Images (same global image replicated num_parts times)
+    """
+    global_image_path = os.path.join(image_folder, "rendering.png")
+
+    if not os.path.exists(global_image_path):
+        print(f"WARNING: Global image not found at {global_image_path}")
+        print(f"WARNING: Will use first part image as fallback for global attention")
+        return None
+
+    print(f"DEBUG: Loading global image from: {global_image_path}")
+
+    if rmbg and rmbg_net is not None:
+        global_img = prepare_image(global_image_path, bg_color=np.array([1.0, 1.0, 1.0]), rmbg_net=rmbg_net)
+        print(f"DEBUG: Applied background removal to global image")
+    else:
+        global_img = Image.open(global_image_path)
+
+    print(f"DEBUG: Successfully loaded global image, size: {global_img.size}")
+
+    # Replicate global image for each part
+    global_images = [global_img.copy() for _ in range(num_parts)]
+    print(f"DEBUG: Replicated global image {num_parts} times for per-part global attention")
+
+    return global_images
+
 @torch.no_grad()
 def run_triposg(
     pipe: Any,
@@ -123,18 +163,40 @@ def run_triposg(
     print(f"DEBUG: Starting inference with {num_parts} parts")
     part_images = load_per_part_images(image_folder, num_parts, rmbg_net, rmbg)
 
+    # Load global image (rendering.png)
+    global_images = load_global_image(image_folder, num_parts, rmbg_net, rmbg)
+
     print(f"DEBUG: Loaded {len(part_images)} part images, starting pipeline...")
     start_time = time.time()
-    outputs = pipe(
-        image=part_images,  # Now passing list of per-part images instead of duplicated single image
-        attention_kwargs={"num_parts": num_parts},
-        num_tokens=num_tokens,
-        generator=torch.Generator(device=pipe.device).manual_seed(seed),
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        max_num_expanded_coords=max_num_expanded_coords,
-        use_flash_decoder=use_flash_decoder,
-    ).meshes
+
+    if global_images is not None:
+        # Use separate global and local images for better attention
+        print(f"DEBUG: Using global image for global attention and per-part images for local attention")
+        outputs = pipe(
+            image=part_images,              # For backward compatibility
+            global_image=global_images,     # Global image for global attention layers
+            local_images=part_images,       # Per-part images for local attention layers
+            attention_kwargs={"num_parts": num_parts},
+            num_tokens=num_tokens,
+            generator=torch.Generator(device=pipe.device).manual_seed(seed),
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            max_num_expanded_coords=max_num_expanded_coords,
+            use_flash_decoder=use_flash_decoder,
+        ).meshes
+    else:
+        # Fallback: use per-part images for both global and local attention
+        print(f"DEBUG: Using per-part images for both global and local attention (fallback mode)")
+        outputs = pipe(
+            image=part_images,  # Use per-part images for both global and local attention
+            attention_kwargs={"num_parts": num_parts},
+            num_tokens=num_tokens,
+            generator=torch.Generator(device=pipe.device).manual_seed(seed),
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            max_num_expanded_coords=max_num_expanded_coords,
+            use_flash_decoder=use_flash_decoder,
+        ).meshes
     end_time = time.time()
     print(f"DEBUG: Pipeline completed in {end_time - start_time:.2f} seconds")
     print(f"DEBUG: Generated {len(outputs)} meshes")
@@ -147,7 +209,7 @@ def run_triposg(
         else:
             print(f"DEBUG: Part {i} mesh has {len(outputs[i].vertices)} vertices and {len(outputs[i].faces)} faces")
 
-    return outputs, part_images
+    return outputs, part_images, global_images
 
 MAX_NUM_PARTS = 16
 
@@ -228,7 +290,7 @@ if __name__ == "__main__":
 
     # run inference
     print(f"DEBUG: Starting inference...")
-    outputs, part_images = run_triposg(
+    outputs, part_images, global_images = run_triposg(
         pipe=pipe,
         image_folder=args.image_folder,
         num_parts=args.num_parts,
@@ -277,6 +339,12 @@ if __name__ == "__main__":
         img_file = os.path.join(export_dir, f"input_part_{i:02}.png")
         img.save(img_file)
         print(f"DEBUG: Saved input image {i} to: {img_file}")
+
+    # Save global image for reference (if available)
+    if global_images is not None:
+        global_img_file = os.path.join(export_dir, "input_global.png")
+        global_images[0].save(global_img_file)  # Save the first copy (they're all the same)
+        print(f"DEBUG: Saved global image to: {global_img_file}")
 
     print(f"✅ Generated {len(outputs)} parts and saved to {export_dir}")
 
@@ -348,6 +416,8 @@ if __name__ == "__main__":
     print("   📁 Individual part meshes: part_00.glb, part_01.glb, ...")
     print("   🔗 Merged object mesh: object.glb")
     print("   🖼️  Input part images: input_part_00.png, input_part_01.png, ...")
+    if global_images is not None:
+        print("   🌐 Input global image: input_global.png")
     if args.render:
         print("   🎬 Rendered animations: rendering.gif, rendering_normal.gif, rendering_grid.gif")
         print("   📸 Rendered frames: rendering.png, rendering_normal.png, rendering_grid.png")
