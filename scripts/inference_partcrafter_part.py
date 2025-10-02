@@ -51,6 +51,7 @@ import os
 import sys
 from glob import glob
 import time
+import json
 from typing import Any, Union
 
 import numpy as np
@@ -326,12 +327,47 @@ if __name__ == "__main__":
         mesh.export(part_file)
         print(f"DEBUG: Saved part {i} to: {part_file}")
 
-    # Save merged mesh
-    print(f"DEBUG: Creating and saving merged mesh...")
+    # Build ordered scene function
+    def build_ordered_scene(meshes, img_names):
+        scene = trimesh.Scene()
+        for i, m in enumerate(meshes):
+            mesh = m.copy()
+            name = f"{i:02d}_{os.path.splitext(os.path.basename(img_names[i]))[0]}"
+            # 给查看器一个稳定的识别锚点
+            if mesh.metadata is None:
+                mesh.metadata = {}
+            mesh.metadata["name"] = name
+            mesh.metadata["extras"] = {"part_id": i, "source_image": img_names[i]}
+            # 强制保序插入
+            scene.add_geometry(mesh, node_name=name, geom_name=name)
+        return scene
+
+    # Save ordered scene version
+    print(f"DEBUG: Creating and saving ordered scene...")
+    img_names = [f"link_{i}.png" for i in range(args.num_parts)]
+    ordered_scene = build_ordered_scene(outputs, img_names)
+    ordered_scene_file = os.path.join(export_dir, "object_scene_ordered.glb")
+    ordered_scene.export(ordered_scene_file)
+    print(f"DEBUG: Saved ordered scene to: {ordered_scene_file}")
+
+    # Save part order mapping for reference
+    mapping = [
+        {"index": i,
+         "source_image": img_names[i],
+         "num_vertices": int(len(outputs[i].vertices) if outputs[i] is not None else 0),
+         "num_faces": int(len(outputs[i].faces) if outputs[i] is not None else 0)}
+        for i in range(len(outputs))
+    ]
+    mapping_file = os.path.join(export_dir, "part_order_mapping.json")
+    with open(mapping_file, "w") as f:
+        json.dump(mapping, f, indent=2)
+    print(f"DEBUG: Saved part order mapping to: {mapping_file}")
+
+    # Optional: Also save traditional merged mesh for compatibility
     merged_mesh = get_colored_mesh_composition(outputs)
     merged_file = os.path.join(export_dir, "object.glb")
     merged_mesh.export(merged_file)
-    print(f"DEBUG: Saved merged mesh to: {merged_file}")
+    print(f"DEBUG: Saved traditional merged mesh to: {merged_file}")
 
     # Save input images for reference
     print(f"DEBUG: Saving input part images for reference...")
@@ -414,7 +450,9 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"🎉 ALL RESULTS SAVED TO: {export_dir}")
     print("   📁 Individual part meshes: part_00.glb, part_01.glb, ...")
-    print("   🔗 Merged object mesh: object.glb")
+    print("   🔗 Ordered scene mesh: object_scene_ordered.glb (preserves input order)")
+    print("   🔗 Traditional merged mesh: object.glb (for compatibility)")
+    print("   📋 Part order mapping: part_order_mapping.json")
     print("   🖼️  Input part images: input_part_00.png, input_part_01.png, ...")
     if global_images is not None:
         print("   🌐 Input global image: input_global.png")
