@@ -53,6 +53,7 @@ import math
 import argparse
 import xml.etree.ElementTree as ET
 from typing import Optional, Tuple, Dict
+import shutil
 
 import numpy as np
 from PIL import Image
@@ -371,15 +372,21 @@ class SingleRevoluteOptimizer(nn.Module):
         self.child_V = child_V    # (Nc, 3)
         self.child_F = child_F    # (Fc, 3)
 
-        # Constant transforms
+        # Constant transforms - precompute rotation matrices
         self.joint_origin_r = torch.tensor(joint_origin_rpy, dtype=torch.float32, device=device)
         self.joint_origin_t0 = torch.tensor(joint_origin_xyz, dtype=torch.float32, device=device)
+        # Precompute constant rotation matrix for joint origin
+        self.Rj = rpy_to_matrix(tuple(joint_origin_rpy)).to(device)
 
         self.child_vis_r = torch.tensor(child_vis_rpy, dtype=torch.float32, device=device)
         self.child_vis_t0 = torch.tensor(child_vis_xyz, dtype=torch.float32, device=device)
+        # Precompute constant rotation matrix for child visual
+        self.Rc = rpy_to_matrix(tuple(child_vis_rpy)).to(device)
 
         self.axis = torch.tensor(joint_axis, dtype=torch.float32, device=device)
         self.angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
+        # Precompute constant rotation matrix for joint axis rotation
+        self.Rrot = axis_angle_to_matrix(self.axis, self.angle).to(device)
 
         # Learnable delta on joint origin translation
         self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
@@ -392,18 +399,16 @@ class SingleRevoluteOptimizer(nn.Module):
         Vp_w = self.parent_V
 
         # Joint origin: R_origin, t_origin + delta
-        Rj = rpy_to_matrix(tuple(self.joint_origin_r.tolist())).to(self.device)
+        # Use precomputed Rj, only tj changes with delta_t (learnable)
         tj = self.joint_origin_t0 + self.delta_t
-        Tj = make_SE3(Rj, tj)
+        Tj = make_SE3(self.Rj, tj)
 
-        # Rotation about joint axis by target angle
-        Rrot = axis_angle_to_matrix(self.axis, self.angle).to(self.device)
-        Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
+        # Rotation about joint axis by target angle (precomputed)
+        Trot = make_SE3(self.Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
 
-        # Child visual local
-        Rc = rpy_to_matrix(tuple(self.child_vis_r.tolist())).to(self.device)
+        # Child visual local (precomputed)
         tc = self.child_vis_t0
-        Tc = make_SE3(Rc, tc)
+        Tc = make_SE3(self.Rc, tc)
 
         # World transform for child: T_world = Tj @ Trot @ Tc
         Tw = Tj @ Trot @ Tc
@@ -516,6 +521,14 @@ def main():
     # Optimizer
     optim = torch.optim.Adam([model.delta_t], lr=args.lr)
 
+    # Create output directory for rendered images
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, "output")
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+    print(f"[INFO] Output directory created: {output_dir}")
+
     # Optimization loop
     for it in range(args.iters):
         optim.zero_grad()
@@ -534,6 +547,13 @@ def main():
         if (it+1) % max(1, args.iters // 10) == 0 or it == 0:
             dt = model.delta_t.detach().cpu().numpy()
             print(f"[{it+1:04d}/{args.iters}] loss={loss.item():.6f}  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})")
+
+            # Save rendered silhouette image
+            sil_np = sil.detach().cpu().numpy()
+            sil_img = (sil_np * 255).astype(np.uint8)
+            img_path = os.path.join(output_dir, f"iter_{it+1:04d}.png")
+            Image.fromarray(sil_img, mode='L').save(img_path)
+            print(f"[INFO] Saved rendered image to: {img_path}")
 
     # Write back URDF
     delta = model.delta_t.detach().cpu().numpy()
