@@ -319,7 +319,11 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
 def build_silhouette_renderer(image_size: int, device: torch.device, fov: float,
                               cam_dist: float, cam_elev: float, cam_azim: float):
     R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim)
-    cameras = PerspectiveCameras(device=device, R=R, T=T, fov=fov)
+    # Convert FOV to focal length for PerspectiveCameras
+    # focal_length = image_size / (2 * tan(fov_rad/2))
+    fov_rad = math.radians(fov)
+    focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
+    cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=focal_length, image_size=((image_size, image_size),))
     raster_settings = RasterizationSettings(
         image_size=image_size,
         blur_radius=1e-6,
@@ -337,7 +341,7 @@ def image_to_silhouette(path: str, image_size: int, threshold: float = 0.9) -> t
     Load a photo and convert to a binary silhouette (1=object, 0=background) by assuming white background.
     threshold = 0.9 means pixels with brightness < 0.9 are considered foreground.
     """
-    img = Image.open(path).convert("RGB").resize((image_size, image_size), Image.BILINEAR)
+    img = Image.open(path).convert("RGB").resize((image_size, image_size), Image.Resampling.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     # Simple heuristic: brightness = mean(R,G,B); foreground if darker than near-white
     bright = arr.mean(axis=2)
@@ -502,7 +506,7 @@ def main():
     # Target silhouette
     if args.target_mask is not None:
         # If a mask is provided (0/255), load directly
-        m = Image.open(args.target_mask).convert("L").resize((args.image_size, args.image_size), Image.NEAREST)
+        m = Image.open(args.target_mask).convert("L").resize((args.image_size, args.image_size), Image.Resampling.NEAREST)
         targ = (torch.from_numpy(np.asarray(m, dtype=np.float32)) / 255.0).unsqueeze(0)
         targ = (targ < 0.5).float()  # black -> 1, white -> 0 (invert if needed)
     else:
