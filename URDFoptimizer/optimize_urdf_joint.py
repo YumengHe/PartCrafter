@@ -66,7 +66,8 @@ try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
         look_at_view_transform, PerspectiveCameras, RasterizationSettings,
-        MeshRenderer, MeshRasterizer, SoftSilhouetteShader, TexturesVertex
+        MeshRenderer, MeshRasterizer, SoftSilhouetteShader, TexturesVertex,
+        BlendParams
     )
     from pytorch3d.structures import Meshes
 except Exception as e:
@@ -320,19 +321,22 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
 def build_silhouette_renderer(image_size: int, device: torch.device, fov: float,
                               cam_dist: float, cam_elev: float, cam_azim: float):
     R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim)
+    R = R.to(device)
+    T = T.to(device)
     # Convert FOV to focal length for PerspectiveCameras
     # focal_length = image_size / (2 * tan(fov_rad/2))
     fov_rad = math.radians(fov)
     focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
-    cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=focal_length, image_size=((image_size, image_size),))
+    cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=((focal_length, focal_length),), image_size=((image_size, image_size),))
     raster_settings = RasterizationSettings(
         image_size=image_size,
-        blur_radius=1e-6,
+        blur_radius=0.0,
         faces_per_pixel=50
     )
+    blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
-        shader=SoftSilhouetteShader()
+        shader=SoftSilhouetteShader(blend_params=blend_params)
     )
     return renderer, cameras
 
