@@ -56,8 +56,8 @@ try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
         look_at_view_transform, FoVPerspectiveCameras, RasterizationSettings,
-        MeshRenderer, MeshRasterizer, SoftSilhouetteShader, TexturesVertex,
-        BlendParams
+        MeshRenderer, MeshRasterizer, HardPhongShader, TexturesVertex,
+        PointLights, Materials
     )
     from pytorch3d.structures import Meshes
 except Exception as e:
@@ -324,43 +324,14 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
     return V, F
 
 
-def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
-                         joint_origin_xyz: np.ndarray, joint_origin_rpy: np.ndarray,
-                         joint_axis: np.ndarray,
-                         parent_vis_xyz: np.ndarray, parent_vis_rpy: np.ndarray,
-                         child_vis_xyz: np.ndarray, child_vis_rpy: np.ndarray,
-                         target_angle_rad: float) -> Tuple[torch.Tensor, float]:
+def compute_scene_bounds_raw_mesh(parent_V: torch.Tensor, child_V: torch.Tensor) -> Tuple[torch.Tensor, float]:
     """
-    Compute the bounding box of the scene including both parent and opened child.
+    Compute the bounding box of the raw mesh geometry (without URDF transforms).
+    This matches the approach in render_utils.py where camera distance is set based on original mesh.
     Returns (center, max_extent) for auto camera positioning.
     """
-    device = parent_V.device
-
-    # Parent vertices in world space with visual transform applied
-    Rp = rpy_to_matrix(tuple(parent_vis_rpy)).to(device)
-    tp = torch.tensor(parent_vis_xyz, dtype=torch.float32, device=device)
-    Tp = make_SE3(Rp, tp)
-    Vp_w = transform_points_h(Tp, parent_V)
-
-    # Transform child vertices to world space at target angle
-    Rj = rpy_to_matrix(tuple(joint_origin_rpy)).to(device)
-    tj = torch.tensor(joint_origin_xyz, dtype=torch.float32, device=device)
-    Tj = make_SE3(Rj, tj)
-
-    axis_t = torch.tensor(joint_axis, dtype=torch.float32, device=device)
-    angle_t = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
-    Rrot = axis_angle_to_matrix(axis_t, angle_t).to(device)
-    Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=device))
-
-    Rc = rpy_to_matrix(tuple(child_vis_rpy)).to(device)
-    tc = torch.tensor(child_vis_xyz, dtype=torch.float32, device=device)
-    Tc = make_SE3(Rc, tc)
-
-    Tw = Tj @ Trot @ Tc
-    Vc_w = transform_points_h(Tw, child_V)
-
-    # Combine all vertices
-    all_verts = torch.cat([Vp_w, Vc_w], dim=0)
+    # Combine raw mesh vertices without any URDF transforms
+    all_verts = torch.cat([parent_V, child_V], dim=0)
 
     # Compute bounding box
     bbox_min = all_verts.min(dim=0)[0]
@@ -375,32 +346,51 @@ def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
 # Rendering + loss
 # ----------------------
 
-def build_silhouette_renderer(image_size: int, device: torch.device, fov: float,
-                              cam_dist: float, cam_elev: float, cam_azim: float,
-                              at: Tuple[float, float, float] = ((0.0, 0.0, 0.0),)):
+def build_phong_renderer(image_size: int, device: torch.device, fov: float,
+                         cam_dist: float, cam_elev: float, cam_azim: float,
+                         at: Tuple[float, float, float] = ((0.0, 0.0, 0.0),)):
     """
-    Build silhouette renderer with camera looking at specified point.
+    Build Phong renderer with camera and lighting setup similar to render_utils.py.
 
     Args:
         at: Camera look-at point (x, y, z). Default is origin.
     """
+    # Camera setup - similar to render_utils.py
+    # Using spherical coordinates: azimuth and elevation
     R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim, at=at, device=device)
 
-    # Use FoVPerspectiveCameras which is more stable and doesn't require manual focal length conversion
+    # Use FoVPerspectiveCameras similar to pyrender's PerspectiveCamera with yfov
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fov)
 
+    # Rasterization settings
     raster_settings = RasterizationSettings(
         image_size=image_size,
         blur_radius=0.0,
-        faces_per_pixel=50
+        faces_per_pixel=1,  # Hard rendering, no anti-aliasing
+        bin_size=None
     )
-    # Adjust blend_params for sharper silhouettes
-    # sigma controls edge softness, gamma controls background blending
-    # Smaller values = sharper edges, but still differentiable
-    blend_params = BlendParams(sigma=1e-6, gamma=1e-6)
+
+    # Lighting setup - place light at camera position similar to DirectionalLight
+    lights = PointLights(
+        device=device,
+        location=[[0.0, 0.0, 0.0]],  # Light at camera position
+        ambient_color=((0.3, 0.3, 0.3),),
+        diffuse_color=((0.6, 0.6, 0.6),),
+        specular_color=((0.1, 0.1, 0.1),)
+    )
+
+    # Materials for Phong shading
+    materials = Materials(
+        device=device,
+        ambient_color=((1.0, 1.0, 1.0),),
+        diffuse_color=((1.0, 1.0, 1.0),),
+        specular_color=((0.2, 0.2, 0.2),),
+        shininess=32.0
+    )
+
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
-        shader=SoftSilhouetteShader(blend_params=blend_params)
+        shader=HardPhongShader(device=device, cameras=cameras, lights=lights, materials=materials)
     )
     return renderer, cameras
 
@@ -512,10 +502,10 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=90.0, help="Angle to open the joint for matching (degrees).")
-    parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees.")
-    parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance (auto-computed if using default 2.5).")
-    parser.add_argument("--cam-elev", type=float, default=10.0, help="Camera elevation in degrees.")
-    parser.add_argument("--cam-azim", type=float, default=90.0, help="Camera azimuth in degrees (0=front, 90=right, 180=back, 270=left).")
+    parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render_utils.py).")
+    parser.add_argument("--cam-dist", type=float, default=3.5, help="Camera distance (matching render_utils.py default radius=3.5).")
+    parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render_utils.py).")
+    parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (matching render_utils.py circular trajectory).")
     parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
@@ -585,31 +575,32 @@ def main():
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
 
-    # Compute scene bounds for automatic camera positioning
-    print(f"\n[DEBUG] ===== Scene Bounds Computation =====")
+    # Compute scene bounds based on RAW mesh (without URDF transforms)
+    # This matches render_utils.py approach where camera is set based on original mesh
+    print(f"\n[DEBUG] ===== Scene Bounds Computation (Raw Mesh) =====")
     target_angle_rad = math.radians(args.target_angle_deg)
     print(f"[DEBUG] Target angle: {args.target_angle_deg} deg = {target_angle_rad:.4f} rad")
 
-    scene_center, scene_extent = compute_scene_bounds(
-        Vp, Vc, j_xyz, j_rpy, jaxis, parent_vis_xyz, parent_vis_rpy,
-        child_vis_xyz, child_vis_rpy, target_angle_rad
-    )
+    scene_center, scene_extent = compute_scene_bounds_raw_mesh(Vp, Vc)
 
     # Auto-adjust camera distance if not manually specified or if --auto-camera is set
     print(f"\n[DEBUG] ===== Camera Setup =====")
-    if args.auto_camera or args.cam_dist == 2.5:  # default value or forced auto
+    if args.auto_camera or args.cam_dist == 3.5:  # new default value matching render_utils.py
         # Calculate distance to fit the whole scene in view
         # dist = extent / (2 * tan(fov/2)) * safety_factor
         fov_rad = math.radians(args.fov)
         auto_cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
         cam_dist = max(auto_cam_dist, 0.5)  # minimum distance 0.5
-        print(f"[INFO] Scene extent: {scene_extent:.4f}, Scene center: [{scene_center[0]:.4f}, {scene_center[1]:.4f}, {scene_center[2]:.4f}]")
+        print(f"[INFO] Raw mesh extent: {scene_extent:.4f}, Center: [{scene_center[0]:.4f}, {scene_center[1]:.4f}, {scene_center[2]:.4f}]")
         print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (original: {args.cam_dist})")
     else:
         cam_dist = args.cam_dist
         print(f"[INFO] Using manual camera distance: {cam_dist}")
 
     print(f"[DEBUG] Camera params: dist={cam_dist:.4f}, elev={args.cam_elev}, azim={args.cam_azim}, fov={args.fov}")
+
+    # Camera looks at origin (0,0,0) similar to render_utils.py
+    scene_center_tuple = ((0.0, 0.0, 0.0),)
 
     # Build optimizer model
     model = SingleRevoluteOptimizer(
@@ -623,11 +614,8 @@ def main():
         device=device
     ).to(device)
 
-    # Convert scene center to tuple for camera look-at
-    scene_center_tuple = ((float(scene_center[0]), float(scene_center[1]), float(scene_center[2])),)
-
-    # Build renderer - camera looks at scene center
-    renderer, cameras = build_silhouette_renderer(
+    # Build renderer with HardPhongShader - camera looks at origin
+    renderer, cameras = build_phong_renderer(
         image_size=args.image_size, device=device, fov=args.fov,
         cam_dist=cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim,
         at=scene_center_tuple
@@ -665,9 +653,10 @@ def main():
     for it in range(args.iters):
         optim.zero_grad()
         meshes = model()
-        # Render silhouette (alpha channel)
+        # Render with HardPhongShader
         images = renderer(meshes)
-        # images: [1, H, W, 4], alpha = images[..., 3]
+        # images: [1, H, W, 4] with RGBA
+        # Extract silhouette from alpha channel
         sil = images[..., 3].squeeze(0)  # HxW
 
         # loss: L2 between silhouette and target
@@ -708,18 +697,24 @@ def main():
             )
             print(f"[INFO] Saved intermediate URDF to: {urdf_path_iter}")
 
-            # Save rendered silhouette image (raw soft silhouette)
+            # Save RGB rendered image
+            rgb_np = images[0, ..., :3].detach().cpu().numpy()  # [H, W, 3]
+            rgb_img = (rgb_np * 255).astype(np.uint8)
+            img_path_rgb = os.path.join(output_dir, f"iter_{it+1:04d}_rgb.png")
+            Image.fromarray(rgb_img, mode='RGB').save(img_path_rgb)
+
+            # Save silhouette (alpha channel)
             sil_np = sil.detach().cpu().numpy()
             sil_img = (sil_np * 255).astype(np.uint8)
-            img_path = os.path.join(output_dir, f"iter_{it+1:04d}.png")
-            Image.fromarray(sil_img, mode='L').save(img_path)
+            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}_silhouette.png")
+            Image.fromarray(sil_img, mode='L').save(img_path_sil)
 
             # Also save a thresholded binary version for clearer visualization
             sil_binary = (sil_np > 0.5).astype(np.uint8) * 255
             img_path_binary = os.path.join(output_dir, f"iter_{it+1:04d}_binary.png")
             Image.fromarray(sil_binary, mode='L').save(img_path_binary)
 
-            print(f"[INFO] Saved rendered images to: {img_path} (soft) and {img_path_binary} (binary)")
+            print(f"[INFO] Saved: {img_path_rgb} (RGB), {img_path_sil} (silhouette), {img_path_binary} (binary)")
 
     # Write back URDF
     delta = model.delta_t.detach().cpu().numpy()
