@@ -56,8 +56,8 @@ try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
         look_at_view_transform, FoVPerspectiveCameras, PerspectiveCameras, RasterizationSettings,
-        MeshRenderer, MeshRasterizer, HardPhongShader, TexturesVertex,
-        PointLights, Materials
+        MeshRenderer, MeshRasterizer, SoftPhongShader, TexturesVertex,
+        DirectionalLights, Materials
     )
     from pytorch3d.structures import Meshes
 except Exception as e:
@@ -377,35 +377,35 @@ def build_phong_renderer(image_size: int, device: torch.device, fov: float,
         in_ndc=False  # Use screen space coordinates
     )
 
-    # Rasterization settings
+    # Rasterization settings for SoftPhongShader
     raster_settings = RasterizationSettings(
         image_size=image_size,
-        blur_radius=0.0,
-        faces_per_pixel=1,  # Hard rendering, no anti-aliasing
+        blur_radius=1e-5,  # Small blur for soft rendering
+        faces_per_pixel=1,
         bin_size=None
     )
 
-    # Lighting setup - place light at camera position similar to DirectionalLight
-    lights = PointLights(
+    # Lighting setup - DirectionalLights for uniform lighting
+    lights = DirectionalLights(
         device=device,
-        location=[[0.0, 0.0, 0.0]],  # Light at camera position
-        ambient_color=((0.3, 0.3, 0.3),),
-        diffuse_color=((0.6, 0.6, 0.6),),
-        specular_color=((0.1, 0.1, 0.1),)
+        direction=((0.0, 0.0, 1.0),),  # Light direction from camera
+        ambient_color=((0.5, 0.5, 0.5),),
+        diffuse_color=((0.5, 0.5, 0.5),),
+        specular_color=((0.0, 0.0, 0.0),)  # No specular (matte surface)
     )
 
-    # Materials for Phong shading
+    # Materials for Phong shading - matte surface (no specular)
     materials = Materials(
         device=device,
         ambient_color=((1.0, 1.0, 1.0),),
         diffuse_color=((1.0, 1.0, 1.0),),
-        specular_color=((0.2, 0.2, 0.2),),
-        shininess=32.0
+        specular_color=((0.0, 0.0, 0.0),),  # No specular (matte)
+        shininess=1.0  # Low shininess for matte appearance
     )
 
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
-        shader=HardPhongShader(device=device, cameras=cameras, lights=lights, materials=materials)
+        shader=SoftPhongShader(device=device, cameras=cameras, lights=lights, materials=materials)
     )
     return renderer, cameras
 
@@ -709,24 +709,13 @@ def main():
             )
             print(f"[INFO] Saved intermediate URDF to: {urdf_path_iter}")
 
-            # Save RGB rendered image
-            rgb_np = images[0, ..., :3].detach().cpu().numpy()  # [H, W, 3]
-            rgb_img = (rgb_np * 255).astype(np.uint8)
-            img_path_rgb = os.path.join(output_dir, f"iter_{it+1:04d}_rgb.png")
-            Image.fromarray(rgb_img, mode='RGB').save(img_path_rgb)
-
-            # Save silhouette (alpha channel)
+            # Save silhouette (alpha channel) - this is what's used for loss calculation
             sil_np = sil.detach().cpu().numpy()
             sil_img = (sil_np * 255).astype(np.uint8)
-            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}_silhouette.png")
+            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}.png")
             Image.fromarray(sil_img, mode='L').save(img_path_sil)
 
-            # Also save a thresholded binary version for clearer visualization
-            sil_binary = (sil_np > 0.5).astype(np.uint8) * 255
-            img_path_binary = os.path.join(output_dir, f"iter_{it+1:04d}_binary.png")
-            Image.fromarray(sil_binary, mode='L').save(img_path_binary)
-
-            print(f"[INFO] Saved: {img_path_rgb} (RGB), {img_path_sil} (silhouette), {img_path_binary} (binary)")
+            print(f"[INFO] Saved silhouette: {img_path_sil}")
 
     # Write back URDF
     delta = model.delta_t.detach().cpu().numpy()
