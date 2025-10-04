@@ -322,21 +322,23 @@ def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
     Compute the bounding box of the scene including both parent and opened child.
     Returns (center, max_extent) for auto camera positioning.
     """
+    device = parent_V.device
+
     # Parent vertices in world space
     Vp_w = parent_V
 
     # Transform child vertices to world space at target angle
-    Rj = rpy_to_matrix(tuple(joint_origin_rpy))
-    tj = torch.tensor(joint_origin_xyz, dtype=torch.float32)
+    Rj = rpy_to_matrix(tuple(joint_origin_rpy)).to(device)
+    tj = torch.tensor(joint_origin_xyz, dtype=torch.float32, device=device)
     Tj = make_SE3(Rj, tj)
 
-    axis_t = torch.tensor(joint_axis, dtype=torch.float32)
-    angle_t = torch.tensor(target_angle_rad, dtype=torch.float32)
-    Rrot = axis_angle_to_matrix(axis_t, angle_t)
-    Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32))
+    axis_t = torch.tensor(joint_axis, dtype=torch.float32, device=device)
+    angle_t = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
+    Rrot = axis_angle_to_matrix(axis_t, angle_t).to(device)
+    Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=device))
 
-    Rc = rpy_to_matrix(tuple(child_vis_rpy))
-    tc = torch.tensor(child_vis_xyz, dtype=torch.float32)
+    Rc = rpy_to_matrix(tuple(child_vis_rpy)).to(device)
+    tc = torch.tensor(child_vis_xyz, dtype=torch.float32, device=device)
     Tc = make_SE3(Rc, tc)
 
     Tw = Tj @ Trot @ Tc
