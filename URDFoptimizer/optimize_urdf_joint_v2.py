@@ -55,7 +55,7 @@ from torch import nn
 try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
-        look_at_view_transform, FoVPerspectiveCameras, RasterizationSettings,
+        look_at_view_transform, FoVPerspectiveCameras, PerspectiveCameras, RasterizationSettings,
         MeshRenderer, MeshRasterizer, HardPhongShader, TexturesVertex,
         PointLights, Materials
     )
@@ -372,14 +372,31 @@ def build_phong_renderer(image_size: int, device: torch.device, fov: float,
     Build Phong renderer with camera and lighting setup similar to render_utils.py.
 
     Args:
+        fov: Vertical field of view in degrees (matching pyrender's yfov)
         at: Camera look-at point (x, y, z). Default is origin.
     """
     # Camera setup - similar to render_utils.py
     # Using spherical coordinates: azimuth and elevation
     R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim, at=at, device=device)
 
-    # Use FoVPerspectiveCameras similar to pyrender's PerspectiveCamera with yfov
-    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fov)
+    # pyrender uses yfov (vertical FOV in radians)
+    # PyTorch3D PerspectiveCameras uses focal_length (fx, fy) and principal_point (px, py)
+    # Convert vertical FOV to focal length to match pyrender exactly:
+    # focal_length = image_size / (2 * tan(yfov/2))
+    fov_rad = math.radians(fov)
+    focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
+
+    # Use PerspectiveCameras with focal_length for exact match with pyrender
+    # Principal point at image center (half of image_size)
+    cameras = PerspectiveCameras(
+        device=device,
+        R=R,
+        T=T,
+        focal_length=((focal_length, focal_length),),
+        principal_point=((image_size / 2.0, image_size / 2.0),),
+        image_size=((image_size, image_size),),
+        in_ndc=False  # Use screen space coordinates
+    )
 
     # Rasterization settings
     raster_settings = RasterizationSettings(
@@ -520,7 +537,7 @@ def main():
     parser.add_argument("--image-size", type=int, default=1024, help="Render size.")
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
-    parser.add_argument("--target-angle-deg", type=float, default=90.0, help="Angle to open the joint for matching (degrees).")
+    parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render.py).")
     parser.add_argument("--cam-dist", type=float, default=4.0, help="Camera distance (matching render.py RADIUS=4).")
     parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render.py).")

@@ -511,7 +511,7 @@ def main():
     parser.add_argument("--image-size", type=int, default=1024, help="Render size.")
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
-    parser.add_argument("--target-angle-deg", type=float, default=90.0, help="Angle to open the joint for matching (degrees).")
+    parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees.")
     parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance (auto-computed if using default 2.5).")
     parser.add_argument("--cam-elev", type=float, default=10.0, help="Camera elevation in degrees.")
