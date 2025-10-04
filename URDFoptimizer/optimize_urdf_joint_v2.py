@@ -270,15 +270,10 @@ def resolve_mesh_path(mesh_path: str, urdf_dir: str) -> str:
     return mesh_path
 
 
-def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale: float, device: torch.device,
-                         normalize: bool = False, normalize_scale: float = 2.0):
+def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale: float, device: torch.device):
     """
     Load mesh (GLB, OBJ, etc.) using trimesh, return (verts: Nx3 torch, faces: Fx3 long).
     Applies scale from URDF and unit_scale.
-
-    Args:
-        normalize: If True, normalize mesh to match preprocess (center at origin, scale to normalize_scale)
-        normalize_scale: Target max extent for normalization (default 2.0 matching preprocess)
     """
     if mesh_path is None:
         # empty
@@ -320,21 +315,6 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
         V = V * float(unit_scale)
         print(f"[DEBUG] Applied unit scale: {unit_scale}")
 
-    # Apply normalization if requested (matching preprocess)
-    if normalize:
-        # Center at origin
-        centroid = V.mean(dim=0)
-        V = V - centroid
-        print(f"[DEBUG] Centered mesh at origin (centroid: {centroid.cpu().numpy()})")
-
-        # Scale to normalize_scale
-        bbox_min = V.min(dim=0)[0]
-        bbox_max = V.max(dim=0)[0]
-        max_extent = (bbox_max - bbox_min).max().item()
-        scale_factor = normalize_scale / max_extent
-        V = V * scale_factor
-        print(f"[DEBUG] Normalized mesh: max_extent={max_extent:.4f}, scale_factor={scale_factor:.4f}, target_scale={normalize_scale}")
-
     # Compute bounding box after all transformations
     v_min = V.min(dim=0)[0].cpu().numpy()
     v_max = V.max(dim=0)[0].cpu().numpy()
@@ -343,11 +323,11 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
     return V, F
 
 
-def compute_scene_bounds_raw_mesh(parent_V: torch.Tensor, child_V: torch.Tensor) -> Tuple[torch.Tensor, float]:
+def compute_scene_bounds_raw_mesh(parent_V: torch.Tensor, child_V: torch.Tensor) -> float:
     """
-    Compute the bounding box of the raw mesh geometry (without URDF transforms).
-    This matches the approach in render_utils.py where camera distance is set based on original mesh.
-    Returns (center, max_extent) for auto camera positioning.
+    Compute the bounding box extent of the raw mesh geometry (without URDF transforms).
+    This is used to automatically set camera distance based on the original mesh size.
+    Returns max_extent for auto camera positioning.
     """
     # Combine raw mesh vertices without any URDF transforms
     all_verts = torch.cat([parent_V, child_V], dim=0)
@@ -355,10 +335,9 @@ def compute_scene_bounds_raw_mesh(parent_V: torch.Tensor, child_V: torch.Tensor)
     # Compute bounding box
     bbox_min = all_verts.min(dim=0)[0]
     bbox_max = all_verts.max(dim=0)[0]
-    center = (bbox_min + bbox_max) / 2.0
     extent = (bbox_max - bbox_min).max().item()
 
-    return center, extent
+    return extent
 
 
 # ----------------------
@@ -539,12 +518,8 @@ def main():
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render.py).")
-    parser.add_argument("--cam-dist", type=float, default=4.0, help="Camera distance (matching render.py RADIUS=4).")
     parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render.py).")
     parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (matching render.py).")
-    parser.add_argument("--normalize-mesh", action="store_true", help="Normalize mesh to match preprocess (scale=2.0, centered at origin).")
-    parser.add_argument("--normalize-scale", type=float, default=2.0, help="Target scale for mesh normalization (matching preprocess).")
-    parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
@@ -602,46 +577,35 @@ def main():
         Fp = torch.tensor([[0,1,2]], dtype=torch.int64, device=device)
     else:
         print(f"\n[DEBUG] Loading parent mesh:")
-        Vp, Fp = load_mesh_as_tensors(parent_mesh_path, parent_scale, args.unit_scale, device,
-                                       normalize=args.normalize_mesh, normalize_scale=args.normalize_scale)
+        Vp, Fp = load_mesh_as_tensors(parent_mesh_path, parent_scale, args.unit_scale, device)
 
     if child_mesh_path is None:
         raise ValueError("Child link has no visual mesh, cannot proceed. Provide a mesh in the URDF visual.")
 
     print(f"\n[DEBUG] Loading child mesh:")
-    Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device,
-                                   normalize=args.normalize_mesh, normalize_scale=args.normalize_scale)
+    Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device)
 
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
 
-    # Compute scene bounds based on RAW mesh (without URDF transforms)
-    # This matches render_utils.py approach where camera is set based on original mesh
+    # Compute scene bounds based on RAW mesh (without URDF transforms, at angle=0)
+    # Camera distance is computed once at initialization based on the original mesh
     print(f"\n[DEBUG] ===== Scene Bounds Computation (Raw Mesh) =====")
-    target_angle_rad = math.radians(args.target_angle_deg)
-    print(f"[DEBUG] Target angle: {args.target_angle_deg} deg = {target_angle_rad:.4f} rad")
+    scene_extent = compute_scene_bounds_raw_mesh(Vp, Vc)
+    print(f"[INFO] Raw mesh extent: {scene_extent:.4f}")
 
-    scene_center, scene_extent = compute_scene_bounds_raw_mesh(Vp, Vc)
-
-    # Auto-adjust camera distance if not manually specified or if --auto-camera is set
+    # Auto-adjust camera distance based on raw mesh extent
+    # This distance is fixed for the entire optimization
     print(f"\n[DEBUG] ===== Camera Setup =====")
-    if args.normalize_mesh:
-        # When using normalized mesh, use fixed camera distance matching preprocess
-        cam_dist = args.cam_dist  # Should be 4.0 by default
-        print(f"[INFO] Using normalized mesh mode, camera distance: {cam_dist} (matching render.py RADIUS=4)")
-    elif args.auto_camera or args.cam_dist == 4.0:  # new default value matching render.py
-        # Calculate distance to fit the whole scene in view
-        # dist = extent / (2 * tan(fov/2)) * safety_factor
-        fov_rad = math.radians(args.fov)
-        auto_cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
-        cam_dist = max(auto_cam_dist, 0.5)  # minimum distance 0.5
-        print(f"[INFO] Raw mesh extent: {scene_extent:.4f}, Center: [{scene_center[0]:.4f}, {scene_center[1]:.4f}, {scene_center[2]:.4f}]")
-        print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (original: {args.cam_dist})")
-    else:
-        cam_dist = args.cam_dist
-        print(f"[INFO] Using manual camera distance: {cam_dist}")
-
+    fov_rad = math.radians(args.fov)
+    cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
+    cam_dist = max(cam_dist, 0.5)  # minimum distance 0.5
+    print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (based on raw mesh extent)")
     print(f"[DEBUG] Camera params: dist={cam_dist:.4f}, elev={args.cam_elev}, azim={args.cam_azim}, fov={args.fov}")
+
+    # Target angle for optimization
+    target_angle_rad = math.radians(args.target_angle_deg)
+    print(f"[DEBUG] Target angle for optimization: {args.target_angle_deg} deg = {target_angle_rad:.4f} rad")
 
     # Camera looks at origin (0,0,0) similar to render_utils.py
     scene_center_tuple = ((0.0, 0.0, 0.0),)
