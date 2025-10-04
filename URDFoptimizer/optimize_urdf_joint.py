@@ -35,17 +35,7 @@ Install (example):
   pip install trimesh Pillow numpy
 
 Example:
-  python optimize_urdf_joint.py \
-      --urdf /path/to/mobility.urdf \
-      --joint-name door_hinge \
-      --opened-img /path/to/open.jpg \
-      --closed-img /path/to/closed.jpg \
-      --target-angle-deg 90 \
-      --unit-scale 1.0 \
-      --iters 600 \
-      --lr 5e-3
-
-Author: ChatGPT (GPT-5 Thinking)
+  python optimize_urdf_joint.py 
 """
 
 import os
@@ -65,7 +55,7 @@ from torch import nn
 try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
-        look_at_view_transform, PerspectiveCameras, RasterizationSettings,
+        look_at_view_transform, FoVPerspectiveCameras, RasterizationSettings,
         MeshRenderer, MeshRasterizer, SoftSilhouetteShader, TexturesVertex,
         BlendParams
     )
@@ -287,17 +277,27 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
         # empty
         V = torch.zeros((0, 3), dtype=torch.float32, device=device)
         F = torch.zeros((0, 3), dtype=torch.int64, device=device)
+        print("[DEBUG] No mesh path provided, returning empty mesh")
         return V, F
 
     if not os.path.exists(mesh_path):
         raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
 
+    print(f"[DEBUG] Loading mesh from: {mesh_path}")
     tm = trimesh.load(mesh_path, force='mesh')
+
     if tm.is_empty:
         raise ValueError(f"Mesh is empty: {mesh_path}")
 
+    print(f"[DEBUG] Loaded mesh: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
+
     V = torch.from_numpy(np.asarray(tm.vertices, dtype=np.float32)).to(device)
     F = torch.from_numpy(np.asarray(tm.faces, dtype=np.int64)).to(device)
+
+    # Compute bounding box before scaling
+    v_min = V.min(dim=0)[0].cpu().numpy()
+    v_max = V.max(dim=0)[0].cpu().numpy()
+    print(f"[DEBUG] Mesh bbox before scaling: min={v_min}, max={v_max}")
 
     # Apply scaling
     s = 1.0
@@ -305,27 +305,40 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
         # URDF mesh scale can be anisotropic
         if np.isscalar(scale):
             V = V * float(scale)
+            print(f"[DEBUG] Applied isotropic scale: {scale}")
         else:
             # anisotropic scaling per-axis
             V = V * torch.tensor(scale, dtype=torch.float32, device=device)
+            print(f"[DEBUG] Applied anisotropic scale: {scale}")
     if unit_scale != 1.0:
         V = V * float(unit_scale)
+        print(f"[DEBUG] Applied unit scale: {unit_scale}")
+
+    # Compute bounding box after scaling
+    v_min = V.min(dim=0)[0].cpu().numpy()
+    v_max = V.max(dim=0)[0].cpu().numpy()
+    print(f"[DEBUG] Mesh bbox after scaling: min={v_min}, max={v_max}")
 
     return V, F
 
 
 def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
                          joint_origin_xyz: np.ndarray, joint_origin_rpy: np.ndarray,
-                         joint_axis: np.ndarray, child_vis_xyz: np.ndarray,
-                         child_vis_rpy: np.ndarray, target_angle_rad: float) -> Tuple[torch.Tensor, float]:
+                         joint_axis: np.ndarray,
+                         parent_vis_xyz: np.ndarray, parent_vis_rpy: np.ndarray,
+                         child_vis_xyz: np.ndarray, child_vis_rpy: np.ndarray,
+                         target_angle_rad: float) -> Tuple[torch.Tensor, float]:
     """
     Compute the bounding box of the scene including both parent and opened child.
     Returns (center, max_extent) for auto camera positioning.
     """
     device = parent_V.device
 
-    # Parent vertices in world space
-    Vp_w = parent_V
+    # Parent vertices in world space with visual transform applied
+    Rp = rpy_to_matrix(tuple(parent_vis_rpy)).to(device)
+    tp = torch.tensor(parent_vis_xyz, dtype=torch.float32, device=device)
+    Tp = make_SE3(Rp, tp)
+    Vp_w = transform_points_h(Tp, parent_V)
 
     # Transform child vertices to world space at target angle
     Rj = rpy_to_matrix(tuple(joint_origin_rpy)).to(device)
@@ -361,15 +374,19 @@ def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
 # ----------------------
 
 def build_silhouette_renderer(image_size: int, device: torch.device, fov: float,
-                              cam_dist: float, cam_elev: float, cam_azim: float):
-    R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim)
-    R = R.to(device)
-    T = T.to(device)
-    # Convert FOV to focal length for PerspectiveCameras
-    # focal_length = image_size / (2 * tan(fov_rad/2))
-    fov_rad = math.radians(fov)
-    focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
-    cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=((focal_length, focal_length),), image_size=((image_size, image_size),))
+                              cam_dist: float, cam_elev: float, cam_azim: float,
+                              at: Tuple[float, float, float] = ((0.0, 0.0, 0.0),)):
+    """
+    Build silhouette renderer with camera looking at specified point.
+
+    Args:
+        at: Camera look-at point (x, y, z). Default is origin.
+    """
+    R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim, at=at, device=device)
+
+    # Use FoVPerspectiveCameras which is more stable and doesn't require manual focal length conversion
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fov)
+
     raster_settings = RasterizationSettings(
         image_size=image_size,
         blur_radius=0.0,
@@ -406,6 +423,7 @@ class SingleRevoluteOptimizer(nn.Module):
                  child_V: torch.Tensor, child_F: torch.Tensor,
                  joint_origin_xyz: np.ndarray, joint_origin_rpy: np.ndarray,
                  joint_axis: np.ndarray,
+                 parent_vis_xyz: np.ndarray, parent_vis_rpy: np.ndarray,
                  child_vis_xyz: np.ndarray, child_vis_rpy: np.ndarray,
                  target_angle_rad: float,
                  device: torch.device):
@@ -417,6 +435,11 @@ class SingleRevoluteOptimizer(nn.Module):
         self.parent_F = parent_F  # (Fp, 3)
         self.child_V = child_V    # (Nc, 3)
         self.child_F = child_F    # (Fc, 3)
+
+        # Parent visual transform (applied to parent mesh)
+        self.parent_vis_r = torch.tensor(parent_vis_rpy, dtype=torch.float32, device=device)
+        self.parent_vis_t = torch.tensor(parent_vis_xyz, dtype=torch.float32, device=device)
+        self.Rp = rpy_to_matrix(tuple(parent_vis_rpy)).to(device)
 
         # Constant transforms - precompute rotation matrices
         self.joint_origin_r = torch.tensor(joint_origin_rpy, dtype=torch.float32, device=device)
@@ -441,8 +464,9 @@ class SingleRevoluteOptimizer(nn.Module):
         """
         Build world-space merged mesh (parent static + child rotated about joint pivot with delta shift).
         """
-        # Parent world = identity * parent_visual (assume parent visual origin baked in the mesh file or zero)
-        Vp_w = self.parent_V
+        # Parent world = apply parent visual transform
+        Tp = make_SE3(self.Rp, self.parent_vis_t)
+        Vp_w = transform_points_h(Tp, self.parent_V)
 
         # Joint origin: R_origin, t_origin + delta
         # Use precomputed Rj, only tj changes with delta_t (learnable)
@@ -517,12 +541,26 @@ def main():
 
     # Child visual (first)
     urdf_dir = os.path.dirname(os.path.abspath(args.urdf))
+    print(f"\n[DEBUG] ===== URDF Parsing =====")
+    print(f"[DEBUG] URDF directory: {urdf_dir}")
+    print(f"[DEBUG] Joint name: {joint_name}")
+    print(f"[DEBUG] Parent link: {parent_link}, Child link: {child_link}")
+    print(f"[DEBUG] Joint origin xyz: {j_xyz}, rpy: {j_rpy}")
+    print(f"[DEBUG] Joint axis: {jaxis}")
+
     child_mesh_path, child_vis_xyz, child_vis_rpy, child_scale = get_link_first_visual(root, child_link)
     parent_mesh_path, parent_vis_xyz, parent_vis_rpy, parent_scale = get_link_first_visual(root, parent_link)
+
+    print(f"[DEBUG] Parent visual: xyz={parent_vis_xyz}, rpy={parent_vis_rpy}, scale={parent_scale}")
+    print(f"[DEBUG] Child visual: xyz={child_vis_xyz}, rpy={child_vis_rpy}, scale={child_scale}")
 
     # Resolve and load meshes (we apply visual origins separately in the FK graph, so we load raw geometry)
     child_mesh_path = resolve_mesh_path(child_mesh_path, urdf_dir) if child_mesh_path else None
     parent_mesh_path = resolve_mesh_path(parent_mesh_path, urdf_dir) if parent_mesh_path else None
+
+    print(f"\n[DEBUG] ===== Mesh Loading =====")
+    print(f"[DEBUG] Parent mesh path: {parent_mesh_path}")
+    print(f"[DEBUG] Child mesh path: {child_mesh_path}")
 
     # If parent has no mesh, create a tiny dummy triangle (to keep structures valid)
     if parent_mesh_path is None:
@@ -530,20 +568,30 @@ def main():
         Vp = torch.tensor([[0,0,0],[1e-6,0,0],[0,1e-6,0]], dtype=torch.float32, device=device)
         Fp = torch.tensor([[0,1,2]], dtype=torch.int64, device=device)
     else:
+        print(f"\n[DEBUG] Loading parent mesh:")
         Vp, Fp = load_mesh_as_tensors(parent_mesh_path, parent_scale, args.unit_scale, device)
 
     if child_mesh_path is None:
         raise ValueError("Child link has no visual mesh, cannot proceed. Provide a mesh in the URDF visual.")
 
+    print(f"\n[DEBUG] Loading child mesh:")
     Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device)
 
+    print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
+    print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
+
     # Compute scene bounds for automatic camera positioning
+    print(f"\n[DEBUG] ===== Scene Bounds Computation =====")
     target_angle_rad = math.radians(args.target_angle_deg)
+    print(f"[DEBUG] Target angle: {args.target_angle_deg} deg = {target_angle_rad:.4f} rad")
+
     scene_center, scene_extent = compute_scene_bounds(
-        Vp, Vc, j_xyz, j_rpy, jaxis, child_vis_xyz, child_vis_rpy, target_angle_rad
+        Vp, Vc, j_xyz, j_rpy, jaxis, parent_vis_xyz, parent_vis_rpy,
+        child_vis_xyz, child_vis_rpy, target_angle_rad
     )
 
     # Auto-adjust camera distance if not manually specified or if --auto-camera is set
+    print(f"\n[DEBUG] ===== Camera Setup =====")
     if args.auto_camera or args.cam_dist == 2.5:  # default value or forced auto
         # Calculate distance to fit the whole scene in view
         # dist = extent / (2 * tan(fov/2)) * safety_factor
@@ -556,32 +604,45 @@ def main():
         cam_dist = args.cam_dist
         print(f"[INFO] Using manual camera distance: {cam_dist}")
 
+    print(f"[DEBUG] Camera params: dist={cam_dist:.4f}, elev={args.cam_elev}, azim={args.cam_azim}, fov={args.fov}")
+
     # Build optimizer model
     model = SingleRevoluteOptimizer(
         parent_V=Vp, parent_F=Fp,
         child_V=Vc, child_F=Fc,
         joint_origin_xyz=j_xyz, joint_origin_rpy=j_rpy,
         joint_axis=jaxis,
+        parent_vis_xyz=parent_vis_xyz, parent_vis_rpy=parent_vis_rpy,
         child_vis_xyz=child_vis_xyz, child_vis_rpy=child_vis_rpy,
         target_angle_rad=target_angle_rad,
         device=device
     ).to(device)
 
-    # Build renderer
+    # Convert scene center to tuple for camera look-at
+    scene_center_tuple = ((float(scene_center[0]), float(scene_center[1]), float(scene_center[2])),)
+
+    # Build renderer - camera looks at scene center
     renderer, cameras = build_silhouette_renderer(
         image_size=args.image_size, device=device, fov=args.fov,
-        cam_dist=cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim
+        cam_dist=cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim,
+        at=scene_center_tuple
     )
 
     # Target silhouette
+    print(f"\n[DEBUG] ===== Target Image Loading =====")
     if args.target_mask is not None:
+        print(f"[DEBUG] Loading target mask from: {args.target_mask}")
         # If a mask is provided (0/255), load directly
         m = Image.open(args.target_mask).convert("L").resize((args.image_size, args.image_size), Image.Resampling.NEAREST)
         targ = (torch.from_numpy(np.asarray(m, dtype=np.float32)) / 255.0).unsqueeze(0)
         targ = (targ < 0.5).float()  # black -> 1, white -> 0 (invert if needed)
     else:
+        print(f"[DEBUG] Extracting silhouette from opened image: {args.opened_img}")
+        print(f"[DEBUG] Using threshold: {args.threshold}")
         targ = image_to_silhouette(args.opened_img, args.image_size, threshold=args.threshold)
     targ = targ.to(device)
+    print(f"[DEBUG] Target silhouette loaded, shape: {targ.shape}, device: {targ.device}")
+    print(f"[DEBUG] Target min/max/mean: {targ.min().item():.4f}/{targ.max().item():.4f}/{targ.mean().item():.4f}")
 
     # Optimizer
     optim = torch.optim.Adam([model.delta_t], lr=args.lr)
@@ -595,6 +656,7 @@ def main():
     print(f"[INFO] Output directory created: {output_dir}")
 
     # Optimization loop
+    print(f"\n[DEBUG] ===== Starting Optimization =====")
     for it in range(args.iters):
         optim.zero_grad()
         meshes = model()
@@ -611,6 +673,22 @@ def main():
 
         if (it+1) % max(1, args.iters // 10) == 0 or it == 0:
             dt = model.delta_t.detach().cpu().numpy()
+
+            # Debug info for first iteration
+            if it == 0:
+                print(f"\n[DEBUG] First iteration diagnostics:")
+                print(f"[DEBUG] Rendered silhouette shape: {sil.shape}")
+                print(f"[DEBUG] Silhouette min/max: {sil.min().item():.4f}/{sil.max().item():.4f}")
+                print(f"[DEBUG] Silhouette mean: {sil.mean().item():.4f}")
+                print(f"[DEBUG] Non-zero pixels in silhouette: {(sil > 0.1).sum().item()}/{sil.numel()}")
+                print(f"[DEBUG] Target silhouette shape: {targ.shape}")
+                print(f"[DEBUG] Target min/max: {targ.min().item():.4f}/{targ.max().item():.4f}")
+                print(f"[DEBUG] Target mean: {targ.mean().item():.4f}")
+                print(f"[DEBUG] Non-zero pixels in target: {(targ > 0.1).sum().item()}/{targ.numel()}")
+                print(f"[DEBUG] Delta has gradient: {model.delta_t.grad is not None}")
+                if model.delta_t.grad is not None:
+                    print(f"[DEBUG] Delta gradient: {model.delta_t.grad.cpu().numpy()}")
+
             print(f"[{it+1:04d}/{args.iters}] loss={loss.item():.6f}  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})")
 
             # Save rendered silhouette image
