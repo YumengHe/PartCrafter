@@ -202,7 +202,7 @@ def get_child_collision_origins(root: ET.Element, link_name: str) -> list:
     return out
 
 
-def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str, delta: np.ndarray, out_path: str):
+def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str, delta: np.ndarray, out_path: str, silent: bool = False):
     """
     Update URDF:
       - joint/@origin xyz += delta
@@ -227,7 +227,8 @@ def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str
     # child visual
     link = root.find(f"./link[@name='{child_link}']")
     if link is None:
-        print(f"[WARN] Child link '{child_link}' not found while updating. Skipping link updates.")
+        if not silent:
+            print(f"[WARN] Child link '{child_link}' not found while updating. Skipping link updates.")
     else:
         vis = link.find('visual')
         if vis is not None:
@@ -249,7 +250,8 @@ def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str
     # Write out
     ET.indent(tree, space="  ", level=0)  # Py3.9+
     tree.write(out_path, encoding='utf-8', xml_declaration=True)
-    print(f"[OK] Wrote optimized URDF to: {out_path}")
+    if not silent:
+        print(f"[OK] Wrote optimized URDF to: {out_path}")
 
 
 # ------------------------------------
@@ -510,7 +512,7 @@ def main():
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees.")
     parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance (auto-computed if using default 2.5).")
     parser.add_argument("--cam-elev", type=float, default=10.0, help="Camera elevation in degrees.")
-    parser.add_argument("--cam-azim", type=float, default=180.0, help="Camera azimuth in degrees.")
+    parser.add_argument("--cam-azim", type=float, default=90.0, help="Camera azimuth in degrees (0=front, 90=right, 180=back, 270=left).")
     parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
@@ -690,6 +692,18 @@ def main():
                     print(f"[DEBUG] Delta gradient: {model.delta_t.grad.cpu().numpy()}")
 
             print(f"[{it+1:04d}/{args.iters}] loss={loss.item():.6f}  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})")
+
+            # Save intermediate URDF with current delta
+            urdf_path_iter = os.path.join(output_dir, f"iter_{it+1:04d}.urdf")
+            update_urdf_joint_and_child(
+                urdf_path=args.urdf,
+                joint_name=joint_name,
+                child_link=child_link,
+                delta=dt,
+                out_path=urdf_path_iter,
+                silent=True  # Suppress "[OK] Wrote..." message for intermediate saves
+            )
+            print(f"[INFO] Saved intermediate URDF to: {urdf_path_iter}")
 
             # Save rendered silhouette image
             sil_np = sil.detach().cpu().numpy()
