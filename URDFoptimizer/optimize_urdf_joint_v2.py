@@ -518,6 +518,7 @@ def main():
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render.py).")
+    parser.add_argument("--cam-dist", type=float, default=None, help="Fixed camera distance. If not specified, auto-compute based on mesh extent.")
     parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render.py).")
     parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (matching render.py).")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
@@ -588,19 +589,22 @@ def main():
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
 
-    # Compute scene bounds based on RAW mesh (without URDF transforms, at angle=0)
-    # Camera distance is computed once at initialization based on the original mesh
-    print(f"\n[DEBUG] ===== Scene Bounds Computation (Raw Mesh) =====")
-    scene_extent = compute_scene_bounds_raw_mesh(Vp, Vc)
-    print(f"[INFO] Raw mesh extent: {scene_extent:.4f}")
-
-    # Auto-adjust camera distance based on raw mesh extent
+    # Camera distance setup
     # This distance is fixed for the entire optimization
     print(f"\n[DEBUG] ===== Camera Setup =====")
-    fov_rad = math.radians(args.fov)
-    cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
-    cam_dist = max(cam_dist, 0.5)  # minimum distance 0.5
-    print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (based on raw mesh extent)")
+    if args.cam_dist is not None:
+        # Use fixed camera distance
+        cam_dist = args.cam_dist
+        print(f"[INFO] Using fixed camera distance: {cam_dist}")
+    else:
+        # Auto-adjust camera distance based on raw mesh extent (without URDF transforms, at angle=0)
+        scene_extent = compute_scene_bounds_raw_mesh(Vp, Vc)
+        print(f"[INFO] Raw mesh extent: {scene_extent:.4f}")
+        fov_rad = math.radians(args.fov)
+        cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
+        cam_dist = max(cam_dist, 0.5)  # minimum distance 0.5
+        print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (based on raw mesh extent)")
+
     print(f"[DEBUG] Camera params: dist={cam_dist:.4f}, elev={args.cam_elev}, azim={args.cam_azim}, fov={args.fov}")
 
     # Target angle for optimization
