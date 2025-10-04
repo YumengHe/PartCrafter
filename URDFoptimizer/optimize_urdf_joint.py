@@ -314,6 +314,46 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
     return V, F
 
 
+def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
+                         joint_origin_xyz: np.ndarray, joint_origin_rpy: np.ndarray,
+                         joint_axis: np.ndarray, child_vis_xyz: np.ndarray,
+                         child_vis_rpy: np.ndarray, target_angle_rad: float) -> Tuple[torch.Tensor, float]:
+    """
+    Compute the bounding box of the scene including both parent and opened child.
+    Returns (center, max_extent) for auto camera positioning.
+    """
+    # Parent vertices in world space
+    Vp_w = parent_V
+
+    # Transform child vertices to world space at target angle
+    Rj = rpy_to_matrix(tuple(joint_origin_rpy))
+    tj = torch.tensor(joint_origin_xyz, dtype=torch.float32)
+    Tj = make_SE3(Rj, tj)
+
+    axis_t = torch.tensor(joint_axis, dtype=torch.float32)
+    angle_t = torch.tensor(target_angle_rad, dtype=torch.float32)
+    Rrot = axis_angle_to_matrix(axis_t, angle_t)
+    Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32))
+
+    Rc = rpy_to_matrix(tuple(child_vis_rpy))
+    tc = torch.tensor(child_vis_xyz, dtype=torch.float32)
+    Tc = make_SE3(Rc, tc)
+
+    Tw = Tj @ Trot @ Tc
+    Vc_w = transform_points_h(Tw, child_V)
+
+    # Combine all vertices
+    all_verts = torch.cat([Vp_w, Vc_w], dim=0)
+
+    # Compute bounding box
+    bbox_min = all_verts.min(dim=0)[0]
+    bbox_max = all_verts.max(dim=0)[0]
+    center = (bbox_min + bbox_max) / 2.0
+    extent = (bbox_max - bbox_min).max().item()
+
+    return center, extent
+
+
 # ----------------------
 # Rendering + loss
 # ----------------------
@@ -434,7 +474,7 @@ def main():
     parser = argparse.ArgumentParser(description="Optimize URDF revolute joint origin xyz by silhouette matching.")
     parser.add_argument("--urdf", type=str, default="input/mobility.urdf", help="Path to URDF file.")
     parser.add_argument("--joint-name", type=str, default=None, help="Name of the revolute joint to optimize (optional).")
-    parser.add_argument("--opened-img", type=str, default="rendering_open.png", help="Target opened photo.")
+    parser.add_argument("--opened-img", type=str, default="input/rendering_open.png", help="Target opened photo.")
     parser.add_argument("--closed-img", type=str, default="input/rendering.png", help="Optional closed photo (sanity checks only).")
     parser.add_argument("--target-mask", type=str, default=None, help="Optional binary mask (white=background, black/object) for opened image.")
     parser.add_argument("--image-size", type=int, default=1024, help="Render size.")
@@ -442,10 +482,11 @@ def main():
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=90.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees.")
-    parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance.")
+    parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance (auto-computed if using default 2.5).")
     parser.add_argument("--cam-elev", type=float, default=10.0, help="Camera elevation in degrees.")
     parser.add_argument("--cam-azim", type=float, default=180.0, help="Camera azimuth in degrees.")
-    parser.add_argument("--iters", type=int, default=600, help="Number of optimization steps.")
+    parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
+    parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
     parser.add_argument("--out-urdf", type=str, default=None, help="Output URDF path (default: <basename>_optimized.urdf).")
@@ -494,8 +535,26 @@ def main():
 
     Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device)
 
-    # Build optimizer model
+    # Compute scene bounds for automatic camera positioning
     target_angle_rad = math.radians(args.target_angle_deg)
+    scene_center, scene_extent = compute_scene_bounds(
+        Vp, Vc, j_xyz, j_rpy, jaxis, child_vis_xyz, child_vis_rpy, target_angle_rad
+    )
+
+    # Auto-adjust camera distance if not manually specified or if --auto-camera is set
+    if args.auto_camera or args.cam_dist == 2.5:  # default value or forced auto
+        # Calculate distance to fit the whole scene in view
+        # dist = extent / (2 * tan(fov/2)) * safety_factor
+        fov_rad = math.radians(args.fov)
+        auto_cam_dist = (scene_extent / (2.0 * math.tan(fov_rad / 2.0))) * 1.8
+        cam_dist = max(auto_cam_dist, 0.5)  # minimum distance 0.5
+        print(f"[INFO] Scene extent: {scene_extent:.4f}, Scene center: [{scene_center[0]:.4f}, {scene_center[1]:.4f}, {scene_center[2]:.4f}]")
+        print(f"[INFO] Auto-adjusted camera distance: {cam_dist:.4f} (original: {args.cam_dist})")
+    else:
+        cam_dist = args.cam_dist
+        print(f"[INFO] Using manual camera distance: {cam_dist}")
+
+    # Build optimizer model
     model = SingleRevoluteOptimizer(
         parent_V=Vp, parent_F=Fp,
         child_V=Vc, child_F=Fc,
@@ -509,7 +568,7 @@ def main():
     # Build renderer
     renderer, cameras = build_silhouette_renderer(
         image_size=args.image_size, device=device, fov=args.fov,
-        cam_dist=args.cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim
+        cam_dist=cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim
     )
 
     # Target silhouette
