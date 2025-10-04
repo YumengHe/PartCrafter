@@ -270,10 +270,15 @@ def resolve_mesh_path(mesh_path: str, urdf_dir: str) -> str:
     return mesh_path
 
 
-def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale: float, device: torch.device):
+def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale: float, device: torch.device,
+                         normalize: bool = False, normalize_scale: float = 2.0):
     """
     Load mesh (GLB, OBJ, etc.) using trimesh, return (verts: Nx3 torch, faces: Fx3 long).
     Applies scale from URDF and unit_scale.
+
+    Args:
+        normalize: If True, normalize mesh to match preprocess (center at origin, scale to normalize_scale)
+        normalize_scale: Target max extent for normalization (default 2.0 matching preprocess)
     """
     if mesh_path is None:
         # empty
@@ -301,8 +306,7 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
     v_max = V.max(dim=0)[0].cpu().numpy()
     print(f"[DEBUG] Mesh bbox before scaling: min={v_min}, max={v_max}")
 
-    # Apply scaling
-    s = 1.0
+    # Apply URDF scaling first
     if scale is not None:
         # URDF mesh scale can be anisotropic
         if np.isscalar(scale):
@@ -316,10 +320,25 @@ def load_mesh_as_tensors(mesh_path: str, scale: Optional[np.ndarray], unit_scale
         V = V * float(unit_scale)
         print(f"[DEBUG] Applied unit scale: {unit_scale}")
 
-    # Compute bounding box after scaling
+    # Apply normalization if requested (matching preprocess)
+    if normalize:
+        # Center at origin
+        centroid = V.mean(dim=0)
+        V = V - centroid
+        print(f"[DEBUG] Centered mesh at origin (centroid: {centroid.cpu().numpy()})")
+
+        # Scale to normalize_scale
+        bbox_min = V.min(dim=0)[0]
+        bbox_max = V.max(dim=0)[0]
+        max_extent = (bbox_max - bbox_min).max().item()
+        scale_factor = normalize_scale / max_extent
+        V = V * scale_factor
+        print(f"[DEBUG] Normalized mesh: max_extent={max_extent:.4f}, scale_factor={scale_factor:.4f}, target_scale={normalize_scale}")
+
+    # Compute bounding box after all transformations
     v_min = V.min(dim=0)[0].cpu().numpy()
     v_max = V.max(dim=0)[0].cpu().numpy()
-    print(f"[DEBUG] Mesh bbox after scaling: min={v_min}, max={v_max}")
+    print(f"[DEBUG] Mesh bbox after all transforms: min={v_min}, max={v_max}")
 
     return V, F
 
@@ -502,10 +521,12 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=90.0, help="Angle to open the joint for matching (degrees).")
-    parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render_utils.py).")
-    parser.add_argument("--cam-dist", type=float, default=3.5, help="Camera distance (matching render_utils.py default radius=3.5).")
-    parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render_utils.py).")
-    parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (matching render_utils.py circular trajectory).")
+    parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees (matching render.py).")
+    parser.add_argument("--cam-dist", type=float, default=4.0, help="Camera distance (matching render.py RADIUS=4).")
+    parser.add_argument("--cam-elev", type=float, default=0.0, help="Camera elevation in degrees (matching render.py).")
+    parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (matching render.py).")
+    parser.add_argument("--normalize-mesh", action="store_true", help="Normalize mesh to match preprocess (scale=2.0, centered at origin).")
+    parser.add_argument("--normalize-scale", type=float, default=2.0, help="Target scale for mesh normalization (matching preprocess).")
     parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
@@ -564,13 +585,15 @@ def main():
         Fp = torch.tensor([[0,1,2]], dtype=torch.int64, device=device)
     else:
         print(f"\n[DEBUG] Loading parent mesh:")
-        Vp, Fp = load_mesh_as_tensors(parent_mesh_path, parent_scale, args.unit_scale, device)
+        Vp, Fp = load_mesh_as_tensors(parent_mesh_path, parent_scale, args.unit_scale, device,
+                                       normalize=args.normalize_mesh, normalize_scale=args.normalize_scale)
 
     if child_mesh_path is None:
         raise ValueError("Child link has no visual mesh, cannot proceed. Provide a mesh in the URDF visual.")
 
     print(f"\n[DEBUG] Loading child mesh:")
-    Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device)
+    Vc, Fc = load_mesh_as_tensors(child_mesh_path, child_scale, args.unit_scale, device,
+                                   normalize=args.normalize_mesh, normalize_scale=args.normalize_scale)
 
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
@@ -585,7 +608,11 @@ def main():
 
     # Auto-adjust camera distance if not manually specified or if --auto-camera is set
     print(f"\n[DEBUG] ===== Camera Setup =====")
-    if args.auto_camera or args.cam_dist == 3.5:  # new default value matching render_utils.py
+    if args.normalize_mesh:
+        # When using normalized mesh, use fixed camera distance matching preprocess
+        cam_dist = args.cam_dist  # Should be 4.0 by default
+        print(f"[INFO] Using normalized mesh mode, camera distance: {cam_dist} (matching render.py RADIUS=4)")
+    elif args.auto_camera or args.cam_dist == 4.0:  # new default value matching render.py
         # Calculate distance to fit the whole scene in view
         # dist = extent / (2 * tan(fov/2)) * safety_factor
         fov_rad = math.radians(args.fov)
