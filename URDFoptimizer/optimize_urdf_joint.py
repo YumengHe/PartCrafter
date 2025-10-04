@@ -61,15 +61,23 @@ from PIL import Image
 import torch
 from torch import nn
 
-# We will use trimesh and pyrender for rendering (consistent with the project's render_utils)
+# PyTorch3D imports
+try:
+    from pytorch3d.io import load_objs_as_meshes
+    from pytorch3d.renderer import (
+        look_at_view_transform, PerspectiveCameras, RasterizationSettings,
+        MeshRenderer, MeshRasterizer, SoftSilhouetteShader, TexturesVertex,
+        BlendParams
+    )
+    from pytorch3d.structures import Meshes
+except Exception as e:
+    raise RuntimeError("PyTorch3D is required. Install it first. Error: {}".format(e))
+
+# We will use trimesh for loading GLB/other mesh formats that PyTorch3D's loader doesn't natively handle.
 try:
     import trimesh
-    import pyrender
-    import cv2
 except Exception as e:
-    raise RuntimeError("trimesh and pyrender are required. Install them first. Error: {}".format(e))
-
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+    raise RuntimeError("trimesh is required. Install it first. Error: {}".format(e))
 
 
 # --------------------------
@@ -352,55 +360,27 @@ def compute_scene_bounds(parent_V: torch.Tensor, child_V: torch.Tensor,
 # Rendering + loss
 # ----------------------
 
-def create_camera_pose_on_sphere(azimuth: float, elevation: float, radius: float) -> np.ndarray:
-    """Create camera pose for pyrender (same as render_utils.py)"""
-    canonical_pose = np.array([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, radius],
-        [0.0, 0.0, 0.0, 1.0]
-    ])
-    azimuth_rad = np.deg2rad(azimuth)
-    elevation_rad = np.deg2rad(elevation)
-    position = np.array([
-        np.cos(elevation_rad) * np.sin(azimuth_rad),
-        np.sin(elevation_rad),
-        np.cos(elevation_rad) * np.cos(azimuth_rad),
-    ])
-
-    # rotation_matrix_from_vectors
-    vec1 = np.array([0.0, 0.0, 1.0])
-    vec2 = position
-    a, b = vec1 / np.linalg.norm(vec1), vec2 / np.linalg.norm(vec2)
-    v = np.cross(a, b)
-    c = np.dot(a, b)
-    s = np.linalg.norm(v)
-    if s == 0:
-        R_mat = np.eye(3) if c > 0 else -np.eye(3)
-    else:
-        kmat = np.array([
-            [0, -v[2], v[1]],
-            [v[2], 0, -v[0]],
-            [-v[1], v[0], 0]
-        ])
-        R_mat = np.eye(3) + kmat + kmat @ kmat * ((1 - c) / (s ** 2))
-
-    R = np.eye(4)
-    R[:3, :3] = R_mat
-    pose = R @ canonical_pose
-    return pose
-
-
-def build_pyrender_scene_and_renderer(image_size: int, fov: float):
-    """Build pyrender scene and renderer"""
-    camera = pyrender.PerspectiveCamera(
-        yfov=np.deg2rad(fov),
-        aspectRatio=1.0,
-        znear=0.1,
-        zfar=100.0
+def build_silhouette_renderer(image_size: int, device: torch.device, fov: float,
+                              cam_dist: float, cam_elev: float, cam_azim: float):
+    R, T = look_at_view_transform(dist=cam_dist, elev=cam_elev, azim=cam_azim)
+    R = R.to(device)
+    T = T.to(device)
+    # Convert FOV to focal length for PerspectiveCameras
+    # focal_length = image_size / (2 * tan(fov_rad/2))
+    fov_rad = math.radians(fov)
+    focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
+    cameras = PerspectiveCameras(device=device, R=R, T=T, focal_length=((focal_length, focal_length),), image_size=((image_size, image_size),))
+    raster_settings = RasterizationSettings(
+        image_size=image_size,
+        blur_radius=0.0,
+        faces_per_pixel=50
     )
-    renderer = pyrender.OffscreenRenderer(image_size, image_size)
-    return camera, renderer
+    blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
+    renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
+        shader=SoftSilhouetteShader(blend_params=blend_params)
+    )
+    return renderer, cameras
 
 
 def image_to_silhouette(path: str, image_size: int, threshold: float = 0.9) -> torch.Tensor:
@@ -457,10 +437,9 @@ class SingleRevoluteOptimizer(nn.Module):
         # Learnable delta on joint origin translation
         self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
 
-    def forward(self) -> trimesh.Trimesh:
+    def forward(self) -> Meshes:
         """
         Build world-space merged mesh (parent static + child rotated about joint pivot with delta shift).
-        Returns a trimesh.Trimesh for pyrender rendering.
         """
         # Parent world = identity * parent_visual (assume parent visual origin baked in the mesh file or zero)
         Vp_w = self.parent_V
@@ -487,13 +466,10 @@ class SingleRevoluteOptimizer(nn.Module):
         F_child = self.child_F + self.parent_V.shape[0]
         F = torch.cat([self.parent_F, F_child], dim=0)
 
-        # Convert to numpy for trimesh
-        V_np = V.detach().cpu().numpy()
-        F_np = F.detach().cpu().numpy()
-
-        # Create trimesh
-        mesh = trimesh.Trimesh(vertices=V_np, faces=F_np)
-        return mesh
+        # Simple white vertex color (unused by silhouette shader but required by Meshes)
+        Vtx = torch.ones_like(V)
+        meshes = Meshes(verts=[V], faces=[F], textures=TexturesVertex(verts_features=[Vtx]))
+        return meshes
 
 
 def main():
@@ -591,9 +567,11 @@ def main():
         device=device
     ).to(device)
 
-    # Build pyrender camera and renderer
-    camera, py_renderer = build_pyrender_scene_and_renderer(args.image_size, args.fov)
-    camera_pose = create_camera_pose_on_sphere(args.cam_azim, args.cam_elev, cam_dist)
+    # Build renderer
+    renderer, cameras = build_silhouette_renderer(
+        image_size=args.image_size, device=device, fov=args.fov,
+        cam_dist=cam_dist, cam_elev=args.cam_elev, cam_azim=args.cam_azim
+    )
 
     # Target silhouette
     if args.target_mask is not None:
@@ -619,20 +597,11 @@ def main():
     # Optimization loop
     for it in range(args.iters):
         optim.zero_grad()
-
-        # Forward pass: get merged mesh
-        mesh = model()
-
-        # Render using pyrender
-        scene = pyrender.Scene.from_trimesh_scene(trimesh.Scene(mesh))
-        camera_node = scene.add(camera, pose=camera_pose)
-        color, depth = py_renderer.render(scene)
-        scene.remove_node(camera_node)
-
-        # Convert to silhouette (binary mask from alpha/depth)
-        # Use depth to create silhouette: object pixels have finite depth
-        sil_np = (depth > 0).astype(np.float32)
-        sil = torch.from_numpy(sil_np).to(device)  # HxW
+        meshes = model()
+        # Render silhouette (alpha channel)
+        images = renderer(meshes)
+        # images: [1, H, W, 4], alpha = images[..., 3]
+        sil = images[..., 3].squeeze(0)  # HxW
 
         # loss: L2 between silhouette and target
         loss = torch.mean((sil - targ.squeeze(0))**2)
@@ -644,17 +613,12 @@ def main():
             dt = model.delta_t.detach().cpu().numpy()
             print(f"[{it+1:04d}/{args.iters}] loss={loss.item():.6f}  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})")
 
-            # Save rendered color and silhouette images
-            color_img_path = os.path.join(output_dir, f"iter_{it+1:04d}_color.png")
-            Image.fromarray(color).save(color_img_path)
-
+            # Save rendered silhouette image
+            sil_np = sil.detach().cpu().numpy()
             sil_img = (sil_np * 255).astype(np.uint8)
-            sil_img_path = os.path.join(output_dir, f"iter_{it+1:04d}_silhouette.png")
-            Image.fromarray(sil_img, mode='L').save(sil_img_path)
-            print(f"[INFO] Saved images to: {color_img_path}, {sil_img_path}")
-
-    # Cleanup pyrender renderer
-    py_renderer.delete()
+            img_path = os.path.join(output_dir, f"iter_{it+1:04d}.png")
+            Image.fromarray(sil_img, mode='L').save(img_path)
+            print(f"[INFO] Saved rendered image to: {img_path}")
 
     # Write back URDF
     delta = model.delta_t.detach().cpu().numpy()
