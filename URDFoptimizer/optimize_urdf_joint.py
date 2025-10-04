@@ -515,7 +515,7 @@ def main():
     parser.add_argument("--fov", type=float, default=40.0, help="Perspective FOV in degrees.")
     parser.add_argument("--cam-dist", type=float, default=2.5, help="Camera distance (auto-computed if using default 2.5).")
     parser.add_argument("--cam-elev", type=float, default=10.0, help="Camera elevation in degrees.")
-    parser.add_argument("--cam-azim", type=float, default=90.0, help="Camera azimuth in degrees (0=front, 90=right, 180=back, 270=left).")
+    parser.add_argument("--cam-azim", type=float, default=0.0, help="Camera azimuth in degrees (0=front, 90=right, 180=back, 270=left).")
     parser.add_argument("--auto-camera", action="store_true", help="Force auto camera distance even if --cam-dist is set.")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
