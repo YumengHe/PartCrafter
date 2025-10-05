@@ -665,11 +665,14 @@ def main():
     for it in range(args.iters):
         optim.zero_grad()
         meshes = model()
-        # Render with HardPhongShader
+        # Render with SoftPhongShader
         images = renderer(meshes)
         # images: [1, H, W, 4] with RGBA
         # Extract silhouette from alpha channel
         sil = images[..., 3].squeeze(0)  # HxW
+
+        # Ensure silhouette is in [0, 1] range
+        sil = torch.clamp(sil, 0.0, 1.0)
 
         # loss: L2 between silhouette and target
         loss = torch.mean((sil - targ.squeeze(0))**2)

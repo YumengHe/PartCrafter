@@ -47,10 +47,12 @@ if __name__ == '__main__':
         os.system(f"python datasets/preprocess/mesh_to_point.py --input {parts_glb_path} --output {output_path} --name {object_id}")
         # 2. Render images (using textured_objs and images folders)
         os.system(f"python datasets/preprocess/render.py --input {subfolder_path} --output {output_path} --name {object_id}")
-        # 3. Render individual parts (using textured_objs and images folders)
+        # 3. Render without texture
+        os.system(f"python datasets/preprocess/render_notexture.py --input {subfolder_path} --output {output_path} --name {object_id}")
+        # 4. Render individual parts (using textured_objs and images folders)
         os.system(f"python datasets/preprocess/render_part.py --input {subfolder_path} --output {output_path} --name {object_id}")
-        # 4. Skip background removal and resizing - keep original rendering.png
-        # 5. Skip IoU calculation 
+        # 5. Skip background removal and resizing - keep original rendering.png
+        # 6. Skip IoU calculation
         time.sleep(1)
     
     # generate configs
