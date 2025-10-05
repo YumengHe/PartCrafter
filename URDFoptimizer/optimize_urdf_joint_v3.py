@@ -386,27 +386,15 @@ def build_phong_renderer(image_size: int, device: torch.device, fov: float = 40.
         bin_size=None
     )
 
-    # Create multiple directional lights in a circular arrangement
-    # Matching render_utils.py environment lighting setup
-    light_positions = []
-    for i in range(num_env_lights):
-        theta = 2 * math.pi * i / num_env_lights
-        pos = [
-            math.sin(theta) * radius,
-            0.0,
-            math.cos(theta) * radius
-        ]
-        light_positions.append(pos)
-
-    # Create directional lights pointing toward origin
-    # Light intensity 2.0 distributed across all lights
-    light_intensity = 2.0 / num_env_lights
+    # Use uniform ambient and diffuse lighting to simulate environment lights
+    # Instead of 36 separate lights, we use strong ambient + diffuse for uniform illumination
+    # This approximates the effect of multiple environment lights
     lights = DirectionalLights(
         device=device,
-        direction=tuple([tuple([-p[0], -p[1], -p[2]]) for p in light_positions]),
-        ambient_color=((0.3, 0.3, 0.3),) * num_env_lights,
-        diffuse_color=tuple([(light_intensity, light_intensity, light_intensity)] * num_env_lights),
-        specular_color=((0.0, 0.0, 0.0),) * num_env_lights
+        direction=((0.0, 1.0, 0.0),),  # Single light from above
+        ambient_color=((0.6, 0.6, 0.6),),  # Strong ambient for uniform base lighting
+        diffuse_color=((0.8, 0.8, 0.8),),  # Strong diffuse matching total intensity 2.0
+        specular_color=((0.0, 0.0, 0.0),)  # No specular
     )
 
     # Materials - simple matte surface
