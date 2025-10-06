@@ -5,13 +5,13 @@ Render URDF at different joint angles using the same camera/lighting as datasets
 
 This script:
 1. Parses URDF to extract parent and child links
-2. Loads meshes from GLB files referenced in URDF
+2. Loads meshes from GLB files referenced in URDF (already split by split_glb.py)
 3. Applies forward kinematics to position child mesh at specified joint angles
 4. Renders using pyrender with same settings as render.py (RADIUS=4, FOV=40, etc.)
 5. Outputs rendered images for each specified angle
 
 Usage:
-    python render_urdf_angles.py --urdf input/mobility.urdf --angles 0,120,160 --output output/
+    python render_urdf_angles.py --urdf render/mobility.urdf --angles 0,120,160 --output render/output/
 """
 
 import os
