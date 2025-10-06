@@ -68,8 +68,8 @@ def split_glb(glb_path: str, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Split GLB file into separate parts")
-    parser.add_argument("--input", type=str, default="render/voxel.glb", help="Path to input GLB file")
-    parser.add_argument("--output", type=str, default="render/glb",
+    parser.add_argument("--input", type=str, default="outputs/test3/voxel.glb", help="Path to input GLB file")
+    parser.add_argument("--output", type=str, default="outputs/test3/glb",
                        help="Output directory for split GLB files")
     args = parser.parse_args()
 

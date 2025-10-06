@@ -1,0 +1,86 @@
+<?xml version="1.0" ?>
+<robot name="partnet_3a910cc1f575b08339d3717288022c20">
+	<link name="base"/>
+	<link name="link_0">
+		<visual name="drawer_front-23">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_0_geometry_0.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_0_geometry_0.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_0" type="prismatic">
+		<origin xyz="0 0 0"/>
+		<axis xyz="0 0 1"/>
+		<child link="link_0"/>
+		<parent link="link_3"/>
+		<limit lower="0" upper="0.5"/>
+	</joint>
+	<link name="link_1">
+		<visual name="drawer_front-16">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_1_geometry_1.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_1_geometry_1.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_1" type="prismatic">
+		<origin xyz="0 0 0"/>
+		<axis xyz="0 0 1"/>
+		<child link="link_1"/>
+		<parent link="link_3"/>
+		<limit lower="0" upper="0.5"/>
+	</joint>
+	<link name="link_2">
+		<visual name="drawer_side-9">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_2_geometry_2.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_2_geometry_2.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_2" type="prismatic">
+		<origin xyz="0 0 0"/>
+		<axis xyz="0 0 1"/>
+		<child link="link_2"/>
+		<parent link="link_3"/>
+		<limit lower="0" upper="0.5"/>
+	</joint>
+	<link name="link_3">
+		<visual name="shelf-43">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_3_geometry_3.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_3_geometry_3.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_3" type="fixed">
+		<origin rpy="1.570796326794897 0 -1.570796326794897" xyz="0 0 0"/>
+		<child link="link_3"/>
+		<parent link="base"/>
+	</joint>
+</robot>

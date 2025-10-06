@@ -650,10 +650,10 @@ class SingleRevoluteOptimizer(nn.Module):
 
 def main():
     parser = argparse.ArgumentParser(description="Optimize URDF revolute joint origin xyz by silhouette matching.")
-    parser.add_argument("--urdf", type=str, default="input/mobility.urdf", help="Path to URDF file.")
+    parser.add_argument("--urdf", type=str, default="outputs/test3/mobility.urdf", help="Path to URDF file.")
     parser.add_argument("--joint-name", type=str, default=None, help="Name of the revolute joint to optimize (optional).")
-    parser.add_argument("--opened-img", type=str, default="input/rendering_open.png", help="Target opened photo.")
-    parser.add_argument("--closed-img", type=str, default="input/rendering.png", help="Optional closed photo (sanity checks only).")
+    parser.add_argument("--opened-img", type=str, default="outputs/test3/rendering_open.png", help="Target opened photo.")
+    parser.add_argument("--closed-img", type=str, default="outputs/test3/rendering.png", help="Optional closed photo (sanity checks only).")
     parser.add_argument("--target-mask", type=str, default=None, help="Optional binary mask (white=background, black/object) for opened image.")
     parser.add_argument("--image-size", type=int, default=1024, help="Render size.")
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
