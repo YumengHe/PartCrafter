@@ -502,17 +502,27 @@ class SingleRevoluteOptimizer(nn.Module):
         self.Rc = rpy_to_matrix(tuple(child_vis_rpy)).to(device)
 
         self.axis = torch.tensor(joint_axis, dtype=torch.float32, device=device)
-        self.angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
-        # Precompute constant rotation matrix for joint axis rotation
-        self.Rrot = axis_angle_to_matrix(self.axis, self.angle).to(device)
+        self.target_angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
 
         # Learnable delta on joint origin translation
         self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
 
-    def forward(self) -> Meshes:
+    def forward(self, angle: Optional[torch.Tensor] = None) -> Meshes:
         """
         Build world-space merged mesh (parent static + child rotated about joint pivot with delta shift).
+
+        Args:
+            angle: Optional joint angle (radians). If None, uses self.target_angle.
+
+        Transform chain for child:
+        world = parent_visual @ joint_origin @ joint_rotation @ child_visual @ local_vertices
+
+        This ensures the joint is defined in the parent's frame, not world frame.
         """
+        # Use provided angle or default target angle
+        if angle is None:
+            angle = self.target_angle
+
         # Parent world = apply parent visual transform
         Tp = make_SE3(self.Rp, self.parent_vis_t)
         Vp_w = transform_points_h(Tp, self.parent_V)
@@ -522,15 +532,17 @@ class SingleRevoluteOptimizer(nn.Module):
         tj = self.joint_origin_t0 + self.delta_t
         Tj = make_SE3(self.Rj, tj)
 
-        # Rotation about joint axis by target angle (precomputed)
-        Trot = make_SE3(self.Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
+        # Rotation about joint axis by specified angle
+        Rrot = axis_angle_to_matrix(self.axis, angle).to(self.device)
+        Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
 
         # Child visual local (precomputed)
         tc = self.child_vis_t0
         Tc = make_SE3(self.Rc, tc)
 
-        # World transform for child: T_world = Tj @ Trot @ Tc
-        Tw = Tj @ Trot @ Tc
+        # World transform for child: T_world = Tp @ Tj @ Trot @ Tc
+        # CRITICAL: Include Tp so joint is in parent's frame, not world frame
+        Tw = Tp @ Tj @ Trot @ Tc
 
         Vc_w = transform_points_h(Tw, self.child_V)
 
@@ -558,6 +570,8 @@ def main():
     parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
+    parser.add_argument("--closed-weight", type=float, default=0.2, help="Weight for closed-state silhouette constraint (0 to disable).")
+    parser.add_argument("--regularization", type=float, default=1e-3, help="L2 regularization on delta_t to prevent drift (0 to disable).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
     parser.add_argument("--out-urdf", type=str, default=None, help="Output URDF path (default: <basename>_optimized.urdf).")
     args = parser.parse_args()
@@ -634,6 +648,8 @@ def main():
     print(f"[INFO]   - faces_per_pixel: 32 (soft rasterization)")
     print(f"[INFO]   - Background: white (1.0, 1.0, 1.0)")
     print(f"[INFO]   - Loss: BCE + Dice + Edge (combined)")
+    print(f"[INFO]   - Closed-state constraint: {args.closed_weight if args.closed_weight > 0 else 'disabled'}")
+    print(f"[INFO]   - Regularization: {args.regularization if args.regularization > 0 else 'disabled'}")
 
     # Target angle for optimization
     target_angle_rad = math.radians(args.target_angle_deg)
@@ -659,21 +675,34 @@ def main():
         radius=4.0  # Fixed radius matching render_notexture.py
     )
 
-    # Target silhouette
+    # Target silhouettes (opened and closed states)
     print(f"\n[DEBUG] ===== Target Image Loading =====")
+
+    # Load opened-state target
     if args.target_mask is not None:
-        print(f"[DEBUG] Loading target mask from: {args.target_mask}")
+        print(f"[DEBUG] Loading opened target mask from: {args.target_mask}")
         # If a mask is provided (0/255), load directly
         m = Image.open(args.target_mask).convert("L").resize((args.image_size, args.image_size), Image.Resampling.NEAREST)
-        targ = (torch.from_numpy(np.asarray(m, dtype=np.float32)) / 255.0).unsqueeze(0)
-        targ = (targ < 0.5).float()  # black -> 1, white -> 0 (invert if needed)
+        targ_opened = (torch.from_numpy(np.asarray(m, dtype=np.float32)) / 255.0).unsqueeze(0)
+        targ_opened = (targ_opened < 0.5).float()  # black -> 1, white -> 0 (invert if needed)
     else:
         print(f"[DEBUG] Extracting silhouette from opened image: {args.opened_img}")
         print(f"[DEBUG] Using threshold: {args.threshold}")
-        targ = image_to_silhouette(args.opened_img, args.image_size, threshold=args.threshold)
-    targ = targ.to(device)
-    print(f"[DEBUG] Target silhouette loaded, shape: {targ.shape}, device: {targ.device}")
-    print(f"[DEBUG] Target min/max/mean: {targ.min().item():.4f}/{targ.max().item():.4f}/{targ.mean().item():.4f}")
+        targ_opened = image_to_silhouette(args.opened_img, args.image_size, threshold=args.threshold)
+    targ_opened = targ_opened.to(device)
+    print(f"[DEBUG] Opened target loaded, shape: {targ_opened.shape}")
+    print(f"[DEBUG] Opened min/max/mean: {targ_opened.min().item():.4f}/{targ_opened.max().item():.4f}/{targ_opened.mean().item():.4f}")
+
+    # Load closed-state target (if constraint is enabled)
+    targ_closed = None
+    if args.closed_weight > 0 and args.closed_img:
+        print(f"[DEBUG] Loading closed-state constraint from: {args.closed_img}")
+        targ_closed = image_to_silhouette(args.closed_img, args.image_size, threshold=args.threshold)
+        targ_closed = targ_closed.to(device)
+        print(f"[DEBUG] Closed target loaded, shape: {targ_closed.shape}")
+        print(f"[DEBUG] Closed constraint weight: {args.closed_weight}")
+    else:
+        print(f"[DEBUG] Closed-state constraint disabled (weight={args.closed_weight})")
 
     # Optimizer
     optim = torch.optim.Adam([model.delta_t], lr=args.lr)
@@ -688,20 +717,39 @@ def main():
 
     # Optimization loop
     print(f"\n[DEBUG] ===== Starting Optimization =====")
+    print(f"[INFO] Regularization weight: {args.regularization}")
+
     for it in range(args.iters):
         optim.zero_grad()
-        meshes = model()
-        # Render with SoftSilhouetteShader
-        images = renderer(meshes)
-        # images: [1, H, W, 4] with RGBA
-        # Extract silhouette from alpha channel
-        sil = images[..., 3].squeeze(0)  # HxW
 
-        # Ensure silhouette is in [0, 1] range
-        sil = torch.clamp(sil, 0.0, 1.0)
+        # Render opened state (target angle)
+        meshes_opened = model()  # Uses default target_angle
+        images_opened = renderer(meshes_opened)
+        sil_opened = images_opened[..., 3].squeeze(0)  # HxW
+        sil_opened = torch.clamp(sil_opened, 0.0, 1.0)
 
-        # Compute combined loss (BCE + Dice + Edge)
-        loss = compute_silhouette_loss(sil, targ, device)
+        # Primary loss: opened-state silhouette matching
+        loss_opened = compute_silhouette_loss(sil_opened, targ_opened, device)
+        loss = loss_opened
+
+        # Closed-state constraint (if enabled)
+        loss_closed = torch.tensor(0.0, device=device)
+        if targ_closed is not None and args.closed_weight > 0:
+            # Render at angle=0 (closed state)
+            angle_closed = torch.tensor(0.0, dtype=torch.float32, device=device)
+            meshes_closed = model(angle=angle_closed)
+            images_closed = renderer(meshes_closed)
+            sil_closed = images_closed[..., 3].squeeze(0)
+            sil_closed = torch.clamp(sil_closed, 0.0, 1.0)
+
+            loss_closed = compute_silhouette_loss(sil_closed, targ_closed, device)
+            loss = loss + args.closed_weight * loss_closed
+
+        # L2 regularization on delta_t (prevent drift)
+        loss_reg = torch.tensor(0.0, device=device)
+        if args.regularization > 0:
+            loss_reg = args.regularization * torch.sum(model.delta_t ** 2)
+            loss = loss + loss_reg
 
         loss.backward()
         optim.step()
@@ -712,19 +760,22 @@ def main():
             # Debug info for first iteration
             if it == 0:
                 print(f"\n[DEBUG] First iteration diagnostics:")
-                print(f"[DEBUG] Rendered silhouette shape: {sil.shape}")
-                print(f"[DEBUG] Silhouette min/max: {sil.min().item():.4f}/{sil.max().item():.4f}")
-                print(f"[DEBUG] Silhouette mean: {sil.mean().item():.4f}")
-                print(f"[DEBUG] Non-zero pixels in silhouette: {(sil > 0.1).sum().item()}/{sil.numel()}")
-                print(f"[DEBUG] Target silhouette shape: {targ.shape}")
-                print(f"[DEBUG] Target min/max: {targ.min().item():.4f}/{targ.max().item():.4f}")
-                print(f"[DEBUG] Target mean: {targ.mean().item():.4f}")
-                print(f"[DEBUG] Non-zero pixels in target: {(targ > 0.1).sum().item()}/{targ.numel()}")
+                print(f"[DEBUG] Opened silhouette shape: {sil_opened.shape}")
+                print(f"[DEBUG] Silhouette min/max: {sil_opened.min().item():.4f}/{sil_opened.max().item():.4f}")
+                print(f"[DEBUG] Silhouette mean: {sil_opened.mean().item():.4f}")
+                print(f"[DEBUG] Non-zero pixels: {(sil_opened > 0.1).sum().item()}/{sil_opened.numel()}")
                 print(f"[DEBUG] Delta has gradient: {model.delta_t.grad is not None}")
                 if model.delta_t.grad is not None:
                     print(f"[DEBUG] Delta gradient: {model.delta_t.grad.cpu().numpy()}")
 
-            print(f"[{it+1:04d}/{args.iters}] loss={loss.item():.6f}  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})")
+            # Print loss breakdown
+            loss_str = f"[{it+1:04d}/{args.iters}] total={loss.item():.6f} (open={loss_opened.item():.6f}"
+            if targ_closed is not None and args.closed_weight > 0:
+                loss_str += f", closed={loss_closed.item():.6f}"
+            if args.regularization > 0:
+                loss_str += f", reg={loss_reg.item():.6f}"
+            loss_str += f")  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})"
+            print(loss_str)
 
             # Save intermediate URDF with current delta
             urdf_path_iter = os.path.join(output_dir, f"iter_{it+1:04d}.urdf")
@@ -738,13 +789,20 @@ def main():
             )
             print(f"[INFO] Saved intermediate URDF to: {urdf_path_iter}")
 
-            # Save silhouette (alpha channel) - this is what's used for loss calculation
-            sil_np = sil.detach().cpu().numpy()
+            # Save opened-state silhouette (primary optimization target)
+            sil_np = sil_opened.detach().cpu().numpy()
             sil_img = (sil_np * 255).astype(np.uint8)
-            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}.png")
+            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}_opened.png")
             Image.fromarray(sil_img, mode='L').save(img_path_sil)
+            print(f"[INFO] Saved opened silhouette: {img_path_sil}")
 
-            print(f"[INFO] Saved silhouette: {img_path_sil}")
+            # Optionally save closed-state silhouette for debugging
+            if targ_closed is not None and args.closed_weight > 0:
+                sil_closed_np = sil_closed.detach().cpu().numpy()
+                sil_closed_img = (sil_closed_np * 255).astype(np.uint8)
+                img_path_closed = os.path.join(output_dir, f"iter_{it+1:04d}_closed.png")
+                Image.fromarray(sil_closed_img, mode='L').save(img_path_closed)
+                print(f"[INFO] Saved closed silhouette: {img_path_closed}")
 
     # Write back URDF
     delta = model.delta_t.detach().cpu().numpy()
