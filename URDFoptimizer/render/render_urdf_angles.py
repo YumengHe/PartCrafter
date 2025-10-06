@@ -274,10 +274,10 @@ def render_scene(scene: trimesh.Scene, output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Render URDF at different joint angles")
-    parser.add_argument("--urdf", type=str, default="URDFoptimizer/render/mobility.urdf", help="Path to URDF file")
+    parser.add_argument("--urdf", type=str, default="render/mobility.urdf", help="Path to URDF file")
     parser.add_argument("--joint-name", type=str, default=None, help="Name of revolute joint (optional)")
     parser.add_argument("--angles", type=str, default="0,120,160", help="Comma-separated list of angles in degrees")
-    parser.add_argument("--output", type=str, default="URDFoptimizer/render/output", help="Output directory")
+    parser.add_argument("--output", type=str, default="render/output", help="Output directory")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor")
     args = parser.parse_args()
 
