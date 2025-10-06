@@ -738,19 +738,12 @@ def main():
             )
             print(f"[INFO] Saved intermediate URDF to: {urdf_path_iter}")
 
-            # Save full RGB rendering with white background
-            rgb_np = images[0, :, :, :3].detach().cpu().numpy()  # Take RGB channels
-            rgb_img = (rgb_np * 255).astype(np.uint8)
-            img_path_rgb = os.path.join(output_dir, f"iter_{it+1:04d}_rgb.png")
-            Image.fromarray(rgb_img).save(img_path_rgb)
-
             # Save silhouette (alpha channel) - this is what's used for loss calculation
             sil_np = sil.detach().cpu().numpy()
             sil_img = (sil_np * 255).astype(np.uint8)
-            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}_sil.png")
+            img_path_sil = os.path.join(output_dir, f"iter_{it+1:04d}.png")
             Image.fromarray(sil_img, mode='L').save(img_path_sil)
 
-            print(f"[INFO] Saved RGB rendering: {img_path_rgb}")
             print(f"[INFO] Saved silhouette: {img_path_sil}")
 
     # Write back URDF
