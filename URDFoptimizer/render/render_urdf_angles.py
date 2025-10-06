@@ -236,7 +236,8 @@ def apply_forward_kinematics(
 # Rendering (using src.utils.render_utils)
 # --------------------------
 
-def render_scene(scene: trimesh.Scene, output_path: str):
+def render_scene(scene: trimesh.Scene, output_path: str,
+                 center: np.ndarray = None, scale: float = None):
     """
     Render scene using the same settings as datasets/preprocess/render.py
 
@@ -245,19 +246,49 @@ def render_scene(scene: trimesh.Scene, output_path: str):
     - IMAGE_SIZE = (2048, 2048)
     - LIGHT_INTENSITY = 2.0
     - NUM_ENV_LIGHTS = 36
+
+    Args:
+        scene: Trimesh scene to render
+        output_path: Output image path
+        center: Fixed center point for normalization (if None, compute from scene)
+        scale: Fixed scale factor for normalization (if None, compute from scene)
+
+    Returns:
+        (center, scale) tuple used for normalization
     """
-    from src.utils.data_utils import normalize_mesh
     from src.utils.render_utils import render_single_view
 
-    # Normalize mesh (center and scale to unit sphere)
-    normalized_scene = normalize_mesh(scene)
-    geometry = normalized_scene.to_geometry()
+    # Apply fixed normalization transform if provided
+    geometry = scene.to_geometry()
 
-    # Render single view
+    if center is None or scale is None:
+        # Compute normalization parameters from this scene
+        bounds = geometry.bounds
+        scene_center = (bounds[0] + bounds[1]) / 2.0
+        scene_scale = np.linalg.norm(bounds[1] - bounds[0])
+
+        if center is None:
+            center = scene_center
+        if scale is None:
+            scale = scene_scale
+
+    # Apply the same transform to all scenes
+    # Translate to origin and scale to unit sphere
+    transform = np.eye(4)
+    transform[:3, 3] = -center
+    geometry.apply_transform(transform)
+
+    if scale > 0:
+        geometry.apply_scale(1.0 / scale)
+
+    # Render single view with fixed camera
     image = render_single_view(
         geometry,
-        radius=RADIUS,
+        azimuth=0.0,      # Fixed azimuth
+        elevation=0.0,    # Fixed elevation
+        radius=RADIUS,    # Fixed distance
         image_size=IMAGE_SIZE,
+        fov=40.0,         # Fixed FOV
         light_intensity=LIGHT_INTENSITY,
         num_env_lights=NUM_ENV_LIGHTS,
         return_type='pil'
@@ -266,6 +297,8 @@ def render_scene(scene: trimesh.Scene, output_path: str):
     # Save image
     image.save(output_path)
     print(f"Saved rendering to: {output_path}")
+
+    return center, scale
 
 
 # --------------------------
@@ -348,8 +381,35 @@ def main():
 
     child_mesh = load_mesh(child_mesh_path, child_scale, args.unit_scale)
 
-    # Render at each angle
-    print(f"\n[INFO] Rendering at {len(angles)} angles...")
+    # Compute normalization parameters from angle=0 scene (reference pose)
+    # This ensures camera stays fixed for all angles
+    print(f"\n[INFO] Computing normalization from angle=0 reference pose...")
+    scene_ref = apply_forward_kinematics(
+        parent_mesh=parent_mesh,
+        child_mesh=child_mesh,
+        parent_vis_xyz=parent_vis_xyz,
+        parent_vis_rpy=parent_vis_rpy,
+        joint_xyz=j_xyz,
+        joint_rpy=j_rpy,
+        joint_axis=jaxis,
+        joint_angle=0.0,  # Reference at angle=0
+        child_vis_xyz=child_vis_xyz,
+        child_vis_rpy=child_vis_rpy
+    )
+
+    # Get normalization parameters from reference scene
+    geometry_ref = scene_ref.to_geometry()
+    bounds_ref = geometry_ref.bounds
+    fixed_center = (bounds_ref[0] + bounds_ref[1]) / 2.0
+    fixed_scale = np.linalg.norm(bounds_ref[1] - bounds_ref[0])
+
+    print(f"[INFO] Fixed normalization:")
+    print(f"  Center: ({fixed_center[0]:.4f}, {fixed_center[1]:.4f}, {fixed_center[2]:.4f})")
+    print(f"  Scale: {fixed_scale:.4f}")
+    print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
+
+    # Render at each angle using the same normalization
+    print(f"\n[INFO] Rendering at {len(angles)} angles with fixed camera...")
     for angle_deg in angles:
         angle_rad = math.radians(angle_deg)
         print(f"\nRendering at {angle_deg}° ({angle_rad:.4f} rad)...")
@@ -368,9 +428,9 @@ def main():
             child_vis_rpy=child_vis_rpy
         )
 
-        # Render
+        # Render with fixed normalization
         output_path = output_dir / f"angle_{int(angle_deg):03d}.png"
-        render_scene(scene, str(output_path))
+        render_scene(scene, str(output_path), center=fixed_center, scale=fixed_scale)
 
     print(f"\n[DONE] Rendered {len(angles)} images to {output_dir}")
 
