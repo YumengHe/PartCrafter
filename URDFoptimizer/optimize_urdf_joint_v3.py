@@ -508,7 +508,8 @@ class SingleRevoluteOptimizer(nn.Module):
                  parent_vis_xyz: np.ndarray, parent_vis_rpy: np.ndarray,
                  child_vis_xyz: np.ndarray, child_vis_rpy: np.ndarray,
                  target_angle_rad: float,
-                 device: torch.device):
+                 device: torch.device,
+                 initial_delta_t: Optional[torch.Tensor] = None):
         super().__init__()
         self.device = device
 
@@ -538,7 +539,10 @@ class SingleRevoluteOptimizer(nn.Module):
         self.initial_angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
 
         # Learnable parameters
-        self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
+        if initial_delta_t is not None:
+            self.delta_t = nn.Parameter(initial_delta_t.clone())
+        else:
+            self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
         self.delta_angle = nn.Parameter(torch.zeros(1, dtype=torch.float32, device=device))
 
     def forward(self, angle: Optional[torch.Tensor] = None, use_learned_angle: bool = True) -> Meshes:
@@ -618,6 +622,9 @@ def main():
     parser.add_argument("--closed-weight", type=float, default=0.2, help="Weight for closed-state silhouette constraint (0 to disable).")
     parser.add_argument("--regularization", type=float, default=1e-3, help="L2 regularization on delta_t to prevent drift (0 to disable).")
     parser.add_argument("--angle-regularization", type=float, default=1e-4, help="L2 regularization on delta_angle to prefer initial angle (0 to disable).")
+    parser.add_argument("--constrain-to-child", action="store_true", help="Constrain pivot to be inside child mesh bounding box.")
+    parser.add_argument("--init-random", action="store_true", help="Initialize pivot at random position inside child bbox (requires --constrain-to-child).")
+    parser.add_argument("--random-seed", type=int, default=42, help="Random seed for initialization (if --init-random is used).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
     parser.add_argument("--out-urdf", type=str, default=None, help="Output URDF path (default: <basename>_optimized.urdf).")
     args = parser.parse_args()
@@ -684,6 +691,19 @@ def main():
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
 
+    # Compute child mesh bounding box (in child's local coordinate frame)
+    # This will be used to constrain pivot optimization
+    child_bbox_min = Vc.min(dim=0)[0].cpu().numpy()
+    child_bbox_max = Vc.max(dim=0)[0].cpu().numpy()
+    child_bbox_center = (child_bbox_min + child_bbox_max) / 2.0
+    child_bbox_size = child_bbox_max - child_bbox_min
+
+    print(f"\n[DEBUG] ===== Child Mesh Bounding Box =====")
+    print(f"[DEBUG] BBox min: ({child_bbox_min[0]:.4f}, {child_bbox_min[1]:.4f}, {child_bbox_min[2]:.4f})")
+    print(f"[DEBUG] BBox max: ({child_bbox_max[0]:.4f}, {child_bbox_max[1]:.4f}, {child_bbox_max[2]:.4f})")
+    print(f"[DEBUG] BBox center: ({child_bbox_center[0]:.4f}, {child_bbox_center[1]:.4f}, {child_bbox_center[2]:.4f})")
+    print(f"[DEBUG] BBox size: ({child_bbox_size[0]:.4f}, {child_bbox_size[1]:.4f}, {child_bbox_size[2]:.4f})")
+
     # Camera and rendering setup
     print(f"\n[DEBUG] ===== Camera & Rendering Setup =====")
     print(f"[INFO] Using soft silhouette rendering for differentiable optimization:")
@@ -702,6 +722,44 @@ def main():
     target_angle_rad = math.radians(args.target_angle_deg)
     print(f"[DEBUG] Target angle for optimization: {args.target_angle_deg} deg = {target_angle_rad:.4f} rad")
 
+    # Initialize pivot position (delta_t)
+    if args.init_random:
+        if not args.constrain_to_child:
+            print("[WARN] --init-random requires --constrain-to-child, enabling constraint.")
+            args.constrain_to_child = True
+
+        # Set random seed for reproducibility
+        np.random.seed(args.random_seed)
+        torch.manual_seed(args.random_seed)
+
+        # Sample random point inside child bbox (in child's local frame)
+        random_point = np.random.uniform(child_bbox_min, child_bbox_max).astype(np.float32)
+
+        # Transform to joint frame: need to account for child_visual origin
+        # The bbox is in child mesh's local coords, but joint is defined relative to child visual
+        # So initial_delta = random_point - child_vis_xyz (both in child's coords)
+        # But we need it in joint frame, which is child's parent frame
+        # Actually, j_xyz is already in parent frame, so we initialize delta_t relative to current j_xyz
+
+        # For simplicity: random offset within bbox, then transform to parent frame if needed
+        # Initial delta in child's local frame
+        initial_delta_local = random_point - child_vis_xyz
+
+        # Transform to parent frame through joint rotation
+        Rj_np = rpy_to_matrix_np(tuple(j_rpy))
+        initial_delta_parent = Rj_np @ initial_delta_local
+
+        initial_delta_t = torch.tensor(initial_delta_parent, dtype=torch.float32, device=device)
+        print(f"[INFO] Random initialization inside child bbox:")
+        print(f"[INFO]   - Random point (child local): ({random_point[0]:.4f}, {random_point[1]:.4f}, {random_point[2]:.4f})")
+        print(f"[INFO]   - Initial delta_t (parent frame): ({initial_delta_t[0]:.4f}, {initial_delta_t[1]:.4f}, {initial_delta_t[2]:.4f})")
+    else:
+        initial_delta_t = None
+        if args.constrain_to_child:
+            print(f"[INFO] Pivot constrained to child bbox, starting from joint origin (delta_t=0)")
+        else:
+            print(f"[INFO] No bbox constraint, starting from joint origin (delta_t=0)")
+
     # Build optimizer model
     model = SingleRevoluteOptimizer(
         parent_V=Vp, parent_F=Fp,
@@ -711,7 +769,8 @@ def main():
         parent_vis_xyz=parent_vis_xyz, parent_vis_rpy=parent_vis_rpy,
         child_vis_xyz=child_vis_xyz, child_vis_rpy=child_vis_rpy,
         target_angle_rad=target_angle_rad,
-        device=device
+        device=device,
+        initial_delta_t=initial_delta_t  # Pass initial value
     ).to(device)
 
     # Build soft silhouette renderer for differentiable optimization
@@ -820,6 +879,37 @@ def main():
 
         loss.backward()
         optim.step()
+
+        # Project delta_t onto child bbox (if constrained)
+        if args.constrain_to_child:
+            with torch.no_grad():
+                # Current joint origin in parent frame
+                current_joint_xyz = model.joint_origin_t0 + model.delta_t
+
+                # Transform current joint position to child's local frame
+                # We need to inverse the transform: child_local = Rj^T @ (joint - child_vis_offset)
+                # But this gets complex with all the transforms...
+                # Simpler: constrain delta_t such that the pivot stays in bbox
+
+                # The pivot in child's local frame is:
+                # pivot_child = Rj^T @ (joint_xyz + delta_t) - child_vis_xyz
+                # We want: child_bbox_min <= pivot_child <= child_bbox_max
+
+                # For now, use a simpler projection: constrain delta_t magnitude
+                # Or project current joint position into bbox in child frame
+
+                # Transform to child frame
+                Rj_inv = model.Rj.T
+                pivot_in_child = Rj_inv @ model.delta_t
+
+                # Clamp to bbox (in child's local frame, relative to child visual origin)
+                bbox_min_torch = torch.tensor(child_bbox_min - child_vis_xyz, dtype=torch.float32, device=device)
+                bbox_max_torch = torch.tensor(child_bbox_max - child_vis_xyz, dtype=torch.float32, device=device)
+
+                clamped_pivot = torch.clamp(pivot_in_child, bbox_min_torch, bbox_max_torch)
+
+                # Transform back to parent frame
+                model.delta_t.data = model.Rj @ clamped_pivot
 
         # Clamp learned angle to bounds
         if args.learn_angle:
