@@ -56,7 +56,7 @@ try:
     from pytorch3d.io import load_objs_as_meshes
     from pytorch3d.renderer import (
         look_at_view_transform, FoVPerspectiveCameras, PerspectiveCameras, RasterizationSettings,
-        MeshRenderer, MeshRasterizer, SoftPhongShader, TexturesVertex,
+        MeshRenderer, MeshRasterizer, SoftPhongShader, SoftSilhouetteShader, TexturesVertex,
         DirectionalLights, Materials, BlendParams
     )
     from pytorch3d.structures import Meshes
@@ -344,29 +344,29 @@ def compute_scene_bounds_raw_mesh(parent_V: torch.Tensor, child_V: torch.Tensor)
 # Rendering + loss
 # ----------------------
 
-def build_phong_renderer(image_size: int, device: torch.device, fov: float = 40.0,
-                         radius: float = 4.0, num_env_lights: int = 36):
+def build_silhouette_renderer(image_size: int, device: torch.device, fov: float = 40.0, radius: float = 4.0):
     """
-    Build Phong renderer matching render_notexture.py settings.
+    Build soft silhouette renderer for differentiable optimization.
+
+    Uses SoftSilhouetteShader with soft rasterization for smooth gradients at edges.
+    This is critical for gradient-based optimization - hard edges give zero gradients.
 
     Camera setup:
     - Fixed at (0, 0, radius) looking at origin
     - FOV: 40 degrees (matching render_notexture.py)
     - radius: 4 (matching RADIUS in render_notexture.py)
 
-    Lighting setup:
-    - 36 directional lights arranged in a circle (matching NUM_ENV_LIGHTS)
-    - Light intensity: 2.0 (matching LIGHT_INTENSITY)
+    Rasterization:
+    - faces_per_pixel=32 for soft visibility
+    - blur_radius calculated from sigma (SoftRas style)
+    - No lighting/materials needed (silhouette only uses alpha)
 
-    Background: White (1.0, 1.0, 1.0)
+    Background: White (1.0, 1.0, 1.0) matching GT extraction
     """
-    # Fixed camera at (0, 0, radius) looking at origin
-    # This matches render_utils.py with azimuth=0, elevation=0
-    R, T = look_at_view_transform(dist=radius, elev=0.0, azim=0.0, device=device)
-
-    # Convert FOV to focal length (matching pyrender)
+    # Camera setup - same as before
     fov_rad = math.radians(fov)
     focal_length = image_size / (2.0 * math.tan(fov_rad / 2.0))
+    R, T = look_at_view_transform(dist=radius, elev=0.0, azim=0.0, device=device)
 
     cameras = PerspectiveCameras(
         device=device,
@@ -378,46 +378,29 @@ def build_phong_renderer(image_size: int, device: torch.device, fov: float = 40.
         in_ndc=False
     )
 
-    # Rasterization settings with white background
+    # Soft rasterization parameters (key for differentiability)
+    faces_per_pixel = 32  # Track multiple faces per pixel for soft edges
+    sigma = 1e-4
+    blur_radius = math.log(1.0 / 1e-4 - 1.0) * sigma  # SoftRas style calculation
+
     raster_settings = RasterizationSettings(
         image_size=image_size,
-        blur_radius=0.0,  # Hard edges (no soft rendering)
-        faces_per_pixel=1,
+        blur_radius=blur_radius,
+        faces_per_pixel=faces_per_pixel,
+        cull_backfaces=False,  # Prevent normal/inner wall affecting silhouette
         bin_size=None
     )
 
-    # Use uniform ambient and diffuse lighting to simulate environment lights
-    # Instead of 36 separate lights, we use strong ambient + diffuse for uniform illumination
-    # This approximates the effect of multiple environment lights
-    lights = DirectionalLights(
-        device=device,
-        direction=((0.0, 1.0, 0.0),),  # Single light from above
-        ambient_color=((0.6, 0.6, 0.6),),  # Strong ambient for uniform base lighting
-        diffuse_color=((0.8, 0.8, 0.8),),  # Strong diffuse matching total intensity 2.0
-        specular_color=((0.0, 0.0, 0.0),)  # No specular
+    # Blend parameters for soft silhouette
+    blend_params = BlendParams(
+        sigma=sigma,
+        gamma=1e-4,
+        background_color=(1.0, 1.0, 1.0)  # White background matching GT
     )
-
-    # Materials - simple matte surface
-    materials = Materials(
-        device=device,
-        ambient_color=((0.8, 0.8, 0.8),),
-        diffuse_color=((0.8, 0.8, 0.8),),
-        specular_color=((0.0, 0.0, 0.0),),
-        shininess=1.0
-    )
-
-    # Set white background color (RGB)
-    blend_params = BlendParams(background_color=(1.0, 1.0, 1.0))
 
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
-        shader=SoftPhongShader(
-            device=device,
-            cameras=cameras,
-            lights=lights,
-            materials=materials,
-            blend_params=blend_params
-        )
+        shader=SoftSilhouetteShader(blend_params=blend_params)
     )
     return renderer, cameras
 
@@ -433,6 +416,50 @@ def image_to_silhouette(path: str, image_size: int, threshold: float = 0.9) -> t
     bright = arr.mean(axis=2)
     mask = (bright < threshold).astype(np.float32)  # 1 if object (dark), 0 if white-ish
     return torch.from_numpy(mask).unsqueeze(0)  # 1xHxW
+
+
+def compute_silhouette_loss(sil: torch.Tensor, targ: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """
+    Compute combined loss for silhouette optimization.
+
+    Args:
+        sil: Rendered silhouette [H, W] in [0, 1]
+        targ: Target silhouette [1, H, W] in [0, 1]
+        device: torch device
+
+    Returns:
+        Combined loss (BCE + Dice + Edge)
+    """
+    import torch.nn.functional as F
+
+    eps = 1e-6
+    targ_2d = targ.squeeze(0)
+
+    # 1. Binary Cross Entropy - stable pixel-wise loss
+    bce = F.binary_cross_entropy(sil, targ_2d, reduction='mean')
+
+    # 2. Soft Dice Loss - handles class imbalance (sparse foreground)
+    intersection = (sil * targ_2d).sum()
+    dice = 1.0 - (2.0 * intersection + eps) / (sil.sum() + targ_2d.sum() + eps)
+
+    # 3. Edge Loss - emphasize boundary matching (Sobel gradients)
+    kx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                      device=device, dtype=sil.dtype).view(1, 1, 3, 3) / 8.0
+    ky = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                      device=device, dtype=sil.dtype).view(1, 1, 3, 3) / 8.0
+
+    def edge_map(x):
+        x4d = x.unsqueeze(0).unsqueeze(0)  # 1x1xHxW
+        gx = F.conv2d(x4d, kx, padding=1)
+        gy = F.conv2d(x4d, ky, padding=1)
+        return torch.sqrt(gx * gx + gy * gy + eps).squeeze(0).squeeze(0)
+
+    edge = F.l1_loss(edge_map(sil), edge_map(targ_2d))
+
+    # Combined loss with tuned weights
+    loss = 1.0 * bce + 0.5 * dice + 0.2 * edge
+
+    return loss
 
 
 # ----------------------
@@ -597,14 +624,16 @@ def main():
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
 
-    # Camera setup - fixed settings matching render_notexture.py
-    print(f"\n[DEBUG] ===== Camera Setup =====")
-    print(f"[INFO] Using fixed camera settings matching render_notexture.py:")
+    # Camera and rendering setup
+    print(f"\n[DEBUG] ===== Camera & Rendering Setup =====")
+    print(f"[INFO] Using soft silhouette rendering for differentiable optimization:")
+    print(f"[INFO]   - Camera: (0, 0, 4) looking at origin")
     print(f"[INFO]   - Radius: 4.0")
     print(f"[INFO]   - FOV: 40.0 degrees")
-    print(f"[INFO]   - Position: (0, 0, 4) looking at origin")
-    print(f"[INFO]   - Environment lights: 36")
-    print(f"[INFO]   - Light intensity: 2.0")
+    print(f"[INFO]   - Renderer: SoftSilhouetteShader (soft edges for gradients)")
+    print(f"[INFO]   - faces_per_pixel: 32 (soft rasterization)")
+    print(f"[INFO]   - Background: white (1.0, 1.0, 1.0)")
+    print(f"[INFO]   - Loss: BCE + Dice + Edge (combined)")
 
     # Target angle for optimization
     target_angle_rad = math.radians(args.target_angle_deg)
@@ -622,13 +651,12 @@ def main():
         device=device
     ).to(device)
 
-    # Build renderer with fixed settings matching render_notexture.py
-    renderer, cameras = build_phong_renderer(
+    # Build soft silhouette renderer for differentiable optimization
+    renderer, cameras = build_silhouette_renderer(
         image_size=args.image_size,
         device=device,
         fov=40.0,  # Fixed FOV matching render_notexture.py
-        radius=4.0,  # Fixed radius matching render_notexture.py
-        num_env_lights=36  # Fixed number of environment lights
+        radius=4.0  # Fixed radius matching render_notexture.py
     )
 
     # Target silhouette
@@ -663,7 +691,7 @@ def main():
     for it in range(args.iters):
         optim.zero_grad()
         meshes = model()
-        # Render with SoftPhongShader
+        # Render with SoftSilhouetteShader
         images = renderer(meshes)
         # images: [1, H, W, 4] with RGBA
         # Extract silhouette from alpha channel
@@ -672,8 +700,8 @@ def main():
         # Ensure silhouette is in [0, 1] range
         sil = torch.clamp(sil, 0.0, 1.0)
 
-        # loss: L2 between silhouette and target
-        loss = torch.mean((sil - targ.squeeze(0))**2)
+        # Compute combined loss (BCE + Dice + Edge)
+        loss = compute_silhouette_loss(sil, targ, device)
 
         loss.backward()
         optim.step()
