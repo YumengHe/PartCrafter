@@ -623,6 +623,7 @@ def main():
     parser.add_argument("--regularization", type=float, default=1e-3, help="L2 regularization on delta_t to prevent drift (0 to disable).")
     parser.add_argument("--angle-regularization", type=float, default=1e-4, help="L2 regularization on delta_angle to prefer initial angle (0 to disable).")
     parser.add_argument("--constrain-to-child", action="store_true", help="Constrain pivot to be inside child mesh bounding box.")
+    parser.add_argument("--constrain-to-parent", action="store_true", help="Constrain pivot to be inside parent mesh geometry (using tight bbox to avoid holes).")
     parser.add_argument("--init-random", action="store_true", help="Initialize pivot at random position inside child bbox (requires --constrain-to-child).")
     parser.add_argument("--random-seed", type=int, default=42, help="Random seed for initialization (if --init-random is used).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
@@ -690,6 +691,23 @@ def main():
 
     print(f"\n[DEBUG] Parent mesh: {Vp.shape[0]} verts, {Fp.shape[0]} faces")
     print(f"[DEBUG] Child mesh: {Vc.shape[0]} verts, {Fc.shape[0]} faces")
+
+    # Compute parent mesh bounding box (in parent's local coordinate frame)
+    # For tight bbox to avoid holes, we use axis-aligned bbox of all vertices
+    if parent_mesh_path is not None and Vp.shape[0] > 3:
+        parent_bbox_min = Vp.min(dim=0)[0].cpu().numpy()
+        parent_bbox_max = Vp.max(dim=0)[0].cpu().numpy()
+        parent_bbox_center = (parent_bbox_min + parent_bbox_max) / 2.0
+        parent_bbox_size = parent_bbox_max - parent_bbox_min
+
+        print(f"\n[DEBUG] ===== Parent Mesh Bounding Box =====")
+        print(f"[DEBUG] BBox min: ({parent_bbox_min[0]:.4f}, {parent_bbox_min[1]:.4f}, {parent_bbox_min[2]:.4f})")
+        print(f"[DEBUG] BBox max: ({parent_bbox_max[0]:.4f}, {parent_bbox_max[1]:.4f}, {parent_bbox_max[2]:.4f})")
+        print(f"[DEBUG] BBox center: ({parent_bbox_center[0]:.4f}, {parent_bbox_center[1]:.4f}, {parent_bbox_center[2]:.4f})")
+        print(f"[DEBUG] BBox size: ({parent_bbox_size[0]:.4f}, {parent_bbox_size[1]:.4f}, {parent_bbox_size[2]:.4f})")
+    else:
+        parent_bbox_min = None
+        parent_bbox_max = None
 
     # Compute child mesh bounding box (in child's local coordinate frame)
     # This will be used to constrain pivot optimization
@@ -910,6 +928,34 @@ def main():
 
                 # Transform back to parent frame
                 model.delta_t.data = model.Rj @ clamped_pivot
+
+        # Project delta_t onto parent bbox (if constrained)
+        if args.constrain_to_parent:
+            if parent_bbox_min is None or parent_bbox_max is None:
+                print("[WARN] Parent bbox not available, skipping parent constraint.")
+            else:
+                with torch.no_grad():
+                    # Current joint origin in parent frame
+                    # The joint is at: joint_origin_t0 + delta_t
+                    # This is already in parent's coordinate frame
+                    current_joint_xyz = model.joint_origin_t0 + model.delta_t
+
+                    # Parent visual origin offset (from parent visual tag)
+                    parent_vis_xyz_tensor = torch.tensor(parent_vis_xyz, dtype=torch.float32, device=device)
+
+                    # Joint position relative to parent visual origin
+                    # joint_relative = current_joint - parent_vis_xyz
+                    joint_relative = current_joint_xyz - parent_vis_xyz_tensor
+
+                    # Clamp to parent bbox (in parent's local frame)
+                    parent_bbox_min_torch = torch.tensor(parent_bbox_min, dtype=torch.float32, device=device)
+                    parent_bbox_max_torch = torch.tensor(parent_bbox_max, dtype=torch.float32, device=device)
+
+                    clamped_joint_relative = torch.clamp(joint_relative, parent_bbox_min_torch, parent_bbox_max_torch)
+
+                    # Convert back to delta_t
+                    clamped_joint_xyz = clamped_joint_relative + parent_vis_xyz_tensor
+                    model.delta_t.data = clamped_joint_xyz - model.joint_origin_t0
 
         # Clamp learned angle to bounds
         if args.learn_angle:
