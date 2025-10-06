@@ -74,8 +74,22 @@ except Exception as e:
 # Utility math / transforms
 # --------------------------
 
+def rpy_to_matrix_np(rpy: Tuple[float, float, float]) -> np.ndarray:
+    """Convert roll-pitch-yaw (XYZ fixed angles) to 3x3 rotation matrix (numpy version)."""
+    r, p, y = rpy
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr           ]
+    ], dtype=np.float32)
+    return R
+
+
 def rpy_to_matrix(rpy: Tuple[float, float, float]) -> torch.Tensor:
-    """Convert roll-pitch-yaw (XYZ fixed angles) to 3x3 rotation matrix."""
+    """Convert roll-pitch-yaw (XYZ fixed angles) to 3x3 rotation matrix (torch version)."""
     r, p, y = rpy
     cr, sr = math.cos(r), math.sin(r)
     cp, sp = math.cos(p), math.sin(p)
@@ -205,9 +219,12 @@ def get_child_collision_origins(root: ET.Element, link_name: str) -> list:
 def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str, delta: np.ndarray, out_path: str, silent: bool = False):
     """
     Update URDF:
-      - joint/@origin xyz += delta
-      - child_link/visual/@origin xyz -= delta
-      - child_link/collision/@origin xyz -= delta (if exist)
+      - joint/@origin xyz += delta (in parent frame)
+      - child_link/visual/@origin xyz -= Rj^T @ delta (in joint frame)
+      - child_link/collision/@origin xyz -= Rj^T @ delta (in joint frame)
+
+    where Rj is the rotation of the joint origin (from rpy).
+    This ensures angle=0 pose remains unchanged.
     """
     tree = ET.parse(urdf_path)
     root = tree.getroot()
@@ -220,11 +237,21 @@ def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str
     if jorigin is None:
         jorigin = ET.SubElement(joint, 'origin')
 
+    # Get joint origin rotation (rpy)
+    cur_rpy = _parse_rpy(jorigin.attrib.get('rpy'))
+
+    # Compute Rj matrix from rpy (numpy version)
+    Rj = rpy_to_matrix_np(tuple(cur_rpy))
+
+    # Transform delta from parent frame to joint frame
+    delta_in_joint_frame = Rj.T @ delta
+
+    # Update joint origin xyz
     cur_xyz = _parse_xyz(jorigin.attrib.get('xyz'))
     new_xyz = cur_xyz + delta
     jorigin.attrib['xyz'] = f"{new_xyz[0]:.8f} {new_xyz[1]:.8f} {new_xyz[2]:.8f}"
 
-    # child visual
+    # child visual - subtract delta in joint frame
     link = root.find(f"./link[@name='{child_link}']")
     if link is None:
         if not silent:
@@ -238,13 +265,13 @@ def update_urdf_joint_and_child(urdf_path: str, joint_name: str, child_link: str
                 cur_vxyz = np.zeros(3, np.float32)
             else:
                 cur_vxyz = _parse_xyz(vorigin.attrib.get('xyz'))
-            new_vxyz = cur_vxyz - delta
+            new_vxyz = cur_vxyz - delta_in_joint_frame
             vorigin.attrib['xyz'] = f"{new_vxyz[0]:.8f} {new_vxyz[1]:.8f} {new_vxyz[2]:.8f}"
 
         # collisions too
         for cori in get_child_collision_origins(root, child_link):
             cur_cxyz = _parse_xyz(cori.attrib.get('xyz'))
-            new_cxyz = cur_cxyz - delta
+            new_cxyz = cur_cxyz - delta_in_joint_frame
             cori.attrib['xyz'] = f"{new_cxyz[0]:.8f} {new_cxyz[1]:.8f} {new_cxyz[2]:.8f}"
 
     # Write out
@@ -548,10 +575,11 @@ class SingleRevoluteOptimizer(nn.Module):
         Rrot = axis_angle_to_matrix(self.axis, angle).to(self.device)
         Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
 
-        # Child visual local: must compensate for delta_t to maintain angle=0 position
-        # When we optimize: joint.origin += delta_t, child_visual.origin -= delta_t
-        # So in FK: child_visual_offset = child_vis_t0 - delta_t
-        tc = self.child_vis_t0 - self.delta_t
+        # Child visual local: must compensate for delta_t in joint's coordinate frame
+        # delta_t is in parent frame, but child visual is in joint frame (after Rj rotation)
+        # So we need: child_visual_offset = child_vis_t0 - Rj^T @ delta_t
+        delta_in_joint_frame = self.Rj.T @ self.delta_t
+        tc = self.child_vis_t0 - delta_in_joint_frame
         Tc = make_SE3(self.Rc, tc)
 
         # World transform for child: T_world = Tp @ Tj @ Trot @ Tc
