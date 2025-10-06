@@ -548,8 +548,10 @@ class SingleRevoluteOptimizer(nn.Module):
         Rrot = axis_angle_to_matrix(self.axis, angle).to(self.device)
         Trot = make_SE3(Rrot, torch.zeros(3, dtype=torch.float32, device=self.device))
 
-        # Child visual local (precomputed)
-        tc = self.child_vis_t0
+        # Child visual local: must compensate for delta_t to maintain angle=0 position
+        # When we optimize: joint.origin += delta_t, child_visual.origin -= delta_t
+        # So in FK: child_visual_offset = child_vis_t0 - delta_t
+        tc = self.child_vis_t0 - self.delta_t
         Tc = make_SE3(self.Rc, tc)
 
         # World transform for child: T_world = Tp @ Tj @ Trot @ Tc
