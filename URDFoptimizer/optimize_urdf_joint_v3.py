@@ -508,26 +508,32 @@ class SingleRevoluteOptimizer(nn.Module):
         self.Rc = rpy_to_matrix(tuple(child_vis_rpy)).to(device)
 
         self.axis = torch.tensor(joint_axis, dtype=torch.float32, device=device)
-        self.target_angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
+        self.initial_angle = torch.tensor(target_angle_rad, dtype=torch.float32, device=device)
 
-        # Learnable delta on joint origin translation
+        # Learnable parameters
         self.delta_t = nn.Parameter(torch.zeros(3, dtype=torch.float32, device=device))
+        self.delta_angle = nn.Parameter(torch.zeros(1, dtype=torch.float32, device=device))
 
-    def forward(self, angle: Optional[torch.Tensor] = None) -> Meshes:
+    def forward(self, angle: Optional[torch.Tensor] = None, use_learned_angle: bool = True) -> Meshes:
         """
         Build world-space merged mesh (parent static + child rotated about joint pivot with delta shift).
 
         Args:
-            angle: Optional joint angle (radians). If None, uses self.target_angle.
+            angle: Optional fixed joint angle (radians). If None, uses learned angle.
+            use_learned_angle: If True and angle is None, use initial_angle + delta_angle.
+                               If False and angle is None, just use initial_angle.
 
         Transform chain for child:
         world = parent_visual @ joint_origin @ joint_rotation @ child_visual @ local_vertices
 
         This ensures the joint is defined in the parent's frame, not world frame.
         """
-        # Use provided angle or default target angle
+        # Determine which angle to use
         if angle is None:
-            angle = self.target_angle
+            if use_learned_angle:
+                angle = self.initial_angle + self.delta_angle.squeeze()
+            else:
+                angle = self.initial_angle
 
         # Parent world = apply parent visual transform
         Tp = make_SE3(self.Rp, self.parent_vis_t)
@@ -573,11 +579,15 @@ def main():
     parser.add_argument("--image-size", type=int, default=1024, help="Render size.")
     parser.add_argument("--threshold", type=float, default=0.9, help="Foreground threshold for white background heuristic.")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
-    parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Angle to open the joint for matching (degrees).")
+    parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Initial angle to open the joint (degrees). Used as starting point if --learn-angle is enabled.")
+    parser.add_argument("--learn-angle", action="store_true", help="Learn the opened joint angle instead of using fixed --target-angle-deg.")
+    parser.add_argument("--angle-bounds", type=str, default="0,180", help="Min and max angle bounds in degrees for learned angle (e.g., '0,90').")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
-    parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam.")
+    parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam (pivot position).")
+    parser.add_argument("--lr-angle", type=float, default=1e-2, help="Learning rate for joint angle (if --learn-angle is enabled).")
     parser.add_argument("--closed-weight", type=float, default=0.2, help="Weight for closed-state silhouette constraint (0 to disable).")
     parser.add_argument("--regularization", type=float, default=1e-3, help="L2 regularization on delta_t to prevent drift (0 to disable).")
+    parser.add_argument("--angle-regularization", type=float, default=1e-4, help="L2 regularization on delta_angle to prefer initial angle (0 to disable).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="cuda or cpu.")
     parser.add_argument("--out-urdf", type=str, default=None, help="Output URDF path (default: <basename>_optimized.urdf).")
     args = parser.parse_args()
@@ -711,8 +721,22 @@ def main():
     else:
         print(f"[DEBUG] Closed-state constraint disabled (weight={args.closed_weight})")
 
-    # Optimizer
-    optim = torch.optim.Adam([model.delta_t], lr=args.lr)
+    # Optimizer - separate learning rates for position and angle
+    if args.learn_angle:
+        optim = torch.optim.Adam([
+            {'params': [model.delta_t], 'lr': args.lr},
+            {'params': [model.delta_angle], 'lr': args.lr_angle}
+        ])
+        print(f"[INFO] Optimizing both pivot position (lr={args.lr}) and angle (lr={args.lr_angle})")
+
+        # Parse angle bounds
+        angle_min, angle_max = map(float, args.angle_bounds.split(','))
+        angle_min_rad = math.radians(angle_min)
+        angle_max_rad = math.radians(angle_max)
+        print(f"[INFO] Angle bounds: [{angle_min}, {angle_max}] degrees = [{angle_min_rad:.4f}, {angle_max_rad:.4f}] rad")
+    else:
+        optim = torch.optim.Adam([model.delta_t], lr=args.lr)
+        print(f"[INFO] Optimizing pivot position only (lr={args.lr}), angle fixed at {args.target_angle_deg} degrees")
 
     # Create output directory for rendered images
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -753,13 +777,28 @@ def main():
             loss = loss + args.closed_weight * loss_closed
 
         # L2 regularization on delta_t (prevent drift)
-        loss_reg = torch.tensor(0.0, device=device)
+        loss_reg_t = torch.tensor(0.0, device=device)
         if args.regularization > 0:
-            loss_reg = args.regularization * torch.sum(model.delta_t ** 2)
-            loss = loss + loss_reg
+            loss_reg_t = args.regularization * torch.sum(model.delta_t ** 2)
+            loss = loss + loss_reg_t
+
+        # L2 regularization on delta_angle (prefer initial angle)
+        loss_reg_angle = torch.tensor(0.0, device=device)
+        if args.learn_angle and args.angle_regularization > 0:
+            loss_reg_angle = args.angle_regularization * torch.sum(model.delta_angle ** 2)
+            loss = loss + loss_reg_angle
 
         loss.backward()
         optim.step()
+
+        # Clamp learned angle to bounds
+        if args.learn_angle:
+            with torch.no_grad():
+                current_angle = model.initial_angle + model.delta_angle.squeeze()
+                # Clamp to bounds
+                clamped_angle = torch.clamp(current_angle, angle_min_rad, angle_max_rad)
+                # Update delta_angle to maintain clamped total
+                model.delta_angle.data = (clamped_angle - model.initial_angle).unsqueeze(0)
 
         if (it+1) % max(1, args.iters // 10) == 0 or it == 0:
             dt = model.delta_t.detach().cpu().numpy()
@@ -780,8 +819,18 @@ def main():
             if targ_closed is not None and args.closed_weight > 0:
                 loss_str += f", closed={loss_closed.item():.6f}"
             if args.regularization > 0:
-                loss_str += f", reg={loss_reg.item():.6f}"
-            loss_str += f")  delta=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})"
+                loss_str += f", reg_t={loss_reg_t.item():.6f}"
+            if args.learn_angle and args.angle_regularization > 0:
+                loss_str += f", reg_a={loss_reg_angle.item():.6f}"
+            loss_str += f")  delta_t=({dt[0]:.5f},{dt[1]:.5f},{dt[2]:.5f})"
+
+            # Add angle info if learning
+            if args.learn_angle:
+                da = model.delta_angle.detach().cpu().item()
+                current_angle = model.initial_angle.item() + da
+                current_angle_deg = math.degrees(current_angle)
+                loss_str += f"  angle={current_angle_deg:.2f}° (Δ={math.degrees(da):.2f}°)"
+
             print(loss_str)
 
             # Save intermediate URDF with current delta
@@ -822,11 +871,21 @@ def main():
         out_path=out_urdf
     )
 
-    print("[DONE] Optimization complete.")
-    print("Recommended next steps:")
+    print("\n[DONE] Optimization complete.")
+    print(f"Final pivot delta: ({delta[0]:.5f}, {delta[1]:.5f}, {delta[2]:.5f})")
+
+    if args.learn_angle:
+        final_delta_angle = model.delta_angle.detach().cpu().item()
+        final_angle_rad = model.initial_angle.item() + final_delta_angle
+        final_angle_deg = math.degrees(final_angle_rad)
+        print(f"Final learned angle: {final_angle_deg:.2f}° (initial: {args.target_angle_deg:.2f}°, delta: {math.degrees(final_delta_angle):.2f}°)")
+        print(f"NOTE: The learned angle ({final_angle_deg:.2f}°) is NOT written to the URDF.")
+        print(f"      You may want to manually update the joint limits or use this angle for visualization.")
+
+    print("\nRecommended next steps:")
     print("  1) Visually inspect the new URDF in a viewer.")
     print("  2) (Optional) Re-run with a better binary mask (--target-mask) instead of the white-background heuristic.")
-    print("  3) Adjust camera params if alignment differs from your photo (same viewpoint assumed).")
+    print("  3) Check intermediate renderings in output/ to verify convergence.")
 
 
 if __name__ == "__main__":
