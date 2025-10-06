@@ -3,20 +3,20 @@
   <link name="base" />
   <link name="link_0">
     <visual name="part_01">
-      <origin xyz="-0.13644283 -0.03056186 0.37981406" />
+      <origin xyz="-0.18202803 0.00000000 -0.20976162" />
       <geometry>
         <mesh filename="part_01.glb" />
       </geometry>
     </visual>
     <collision>
-      <origin xyz="-0.13644283 -0.03056186 0.37981406" />
+      <origin xyz="-0.18202803 0.00000000 -0.20976162" />
       <geometry>
         <mesh filename="part_01.glb" />
       </geometry>
     </collision>
   </link>
   <joint name="joint_0" type="revolute">
-    <origin xyz="0.13644283 0.03056186 -0.37981406" />
+    <origin xyz="0.18202803 0.00000000 0.20976162" />
     <axis xyz="0 -1 0" />
     <child link="link_0" />
     <parent link="link_1" />

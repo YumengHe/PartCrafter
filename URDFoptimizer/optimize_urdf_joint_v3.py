@@ -615,7 +615,7 @@ def main():
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor (e.g., 0.001 for mm->m).")
     parser.add_argument("--target-angle-deg", type=float, default=35.0, help="Initial angle to open the joint (degrees). Used as starting point if --learn-angle is enabled.")
     parser.add_argument("--learn-angle", action="store_true", help="Learn the opened joint angle instead of using fixed --target-angle-deg.")
-    parser.add_argument("--angle-bounds", type=str, default="0,180", help="Min and max angle bounds in degrees for learned angle (e.g., '0,90').")
+    parser.add_argument("--angle-bounds", type=str, default="35,180", help="Min and max angle bounds in degrees for learned angle (e.g., '0,90').")
     parser.add_argument("--iters", type=int, default=200, help="Number of optimization steps.")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate for Adam (pivot position).")
     parser.add_argument("--lr-angle", type=float, default=1e-2, help="Learning rate for joint angle (if --learn-angle is enabled).")
