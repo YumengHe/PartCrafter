@@ -348,8 +348,10 @@ def build_silhouette_renderer(image_size: int, device: torch.device, fov: float 
     """
     Build soft silhouette renderer for differentiable optimization.
 
-    Uses SoftSilhouetteShader with soft rasterization for smooth gradients at edges.
-    This is critical for gradient-based optimization - hard edges give zero gradients.
+    Uses SoftSilhouetteShader with carefully tuned parameters for:
+    - Clean interior (solid white/black, no artifacts)
+    - Soft edges only at true boundary (2-4px gradient band)
+    - Smooth gradients for optimization
 
     Camera setup:
     - Fixed at (0, 0, radius) looking at origin
@@ -357,8 +359,9 @@ def build_silhouette_renderer(image_size: int, device: torch.device, fov: float 
     - radius: 4 (matching RADIUS in render_notexture.py)
 
     Rasterization:
-    - faces_per_pixel=32 for soft visibility
-    - blur_radius calculated from sigma (SoftRas style)
+    - faces_per_pixel=50 for proper occlusion handling
+    - sigma=1e-5, gamma=1e-6 for sharp interior, soft boundary only
+    - cull_backfaces=True to prevent internal edges showing
     - No lighting/materials needed (silhouette only uses alpha)
 
     Background: White (1.0, 1.0, 1.0) matching GT extraction
@@ -379,22 +382,25 @@ def build_silhouette_renderer(image_size: int, device: torch.device, fov: float 
     )
 
     # Soft rasterization parameters (key for differentiability)
-    faces_per_pixel = 32  # Track multiple faces per pixel for soft edges
-    sigma = 1e-4
-    blur_radius = math.log(1.0 / 1e-4 - 1.0) * sigma  # SoftRas style calculation
+    # Adjusted for clean silhouettes: only edges should be soft, interior solid white
+    faces_per_pixel = 50  # More faces to handle occlusion properly
+    sigma = 1e-5  # Smaller sigma = sharper interior, soft only at true boundary
+    blur_radius = np.log(1.0 / 1e-4 - 1.0) * sigma  # Narrow blur band
 
     raster_settings = RasterizationSettings(
         image_size=image_size,
         blur_radius=blur_radius,
         faces_per_pixel=faces_per_pixel,
-        cull_backfaces=False,  # Prevent normal/inner wall affecting silhouette
+        cull_backfaces=True,  # Cull backfaces to avoid internal edges showing
+        perspective_correct=True,  # More accurate rasterization
         bin_size=None
     )
 
     # Blend parameters for soft silhouette
+    # Smaller gamma = cleaner interior (less blending of overlapping faces)
     blend_params = BlendParams(
         sigma=sigma,
-        gamma=1e-4,
+        gamma=1e-6,  # Very small gamma for clean interior
         background_color=(1.0, 1.0, 1.0)  # White background matching GT
     )
 
@@ -644,8 +650,9 @@ def main():
     print(f"[INFO]   - Camera: (0, 0, 4) looking at origin")
     print(f"[INFO]   - Radius: 4.0")
     print(f"[INFO]   - FOV: 40.0 degrees")
-    print(f"[INFO]   - Renderer: SoftSilhouetteShader (soft edges for gradients)")
-    print(f"[INFO]   - faces_per_pixel: 32 (soft rasterization)")
+    print(f"[INFO]   - Renderer: SoftSilhouetteShader")
+    print(f"[INFO]   - Rasterization: faces_per_pixel=50, sigma=1e-5, gamma=1e-6")
+    print(f"[INFO]   - Backface culling: enabled (clean interior)")
     print(f"[INFO]   - Background: white (1.0, 1.0, 1.0)")
     print(f"[INFO]   - Loss: BCE + Dice + Edge (combined)")
     print(f"[INFO]   - Closed-state constraint: {args.closed_weight if args.closed_weight > 0 else 'disabled'}")
