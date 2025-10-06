@@ -237,7 +237,7 @@ def apply_forward_kinematics(
 # --------------------------
 
 def render_scene(scene: trimesh.Scene, output_path: str,
-                 center: np.ndarray = None, scale: float = None):
+                 translation: np.ndarray = None, scale: float = None):
     """
     Render scene using the same settings as datasets/preprocess/render.py
 
@@ -250,36 +250,35 @@ def render_scene(scene: trimesh.Scene, output_path: str,
     Args:
         scene: Trimesh scene to render
         output_path: Output image path
-        center: Fixed center point for normalization (if None, compute from scene)
+        translation: Fixed translation for normalization (if None, compute from scene)
         scale: Fixed scale factor for normalization (if None, compute from scene)
 
     Returns:
-        (center, scale) tuple used for normalization
+        (translation, scale) tuple used for normalization
     """
     from src.utils.render_utils import render_single_view
 
-    # Apply fixed normalization transform if provided
-    geometry = scene.to_geometry()
+    # Copy scene to avoid modifying original
+    scene_copy = scene.copy()
 
-    if center is None or scale is None:
-        # Compute normalization parameters from this scene
-        bounds = geometry.bounds
-        scene_center = (bounds[0] + bounds[1]) / 2.0
-        scene_scale = np.linalg.norm(bounds[1] - bounds[0])
+    if translation is None or scale is None:
+        # Compute normalization parameters using the SAME method as normalize_mesh
+        # in src.utils.data_utils (lines 14-18)
+        bbox = scene_copy.bounding_box
+        computed_translation = -bbox.centroid
+        computed_scale = 2.0 / bbox.primitive.extents.max()
 
-        if center is None:
-            center = scene_center
+        if translation is None:
+            translation = computed_translation
         if scale is None:
-            scale = scene_scale
+            scale = computed_scale
 
-    # Apply the same transform to all scenes
-    # Translate to origin and scale to unit sphere
-    transform = np.eye(4)
-    transform[:3, 3] = -center
-    geometry.apply_transform(transform)
+    # Apply the same normalization as normalize_mesh
+    scene_copy.apply_translation(translation)
+    scene_copy.apply_scale(scale)
 
-    if scale > 0:
-        geometry.apply_scale(1.0 / scale)
+    # Convert to geometry for rendering
+    geometry = scene_copy.to_geometry()
 
     # Render single view with fixed camera
     image = render_single_view(
@@ -298,7 +297,7 @@ def render_scene(scene: trimesh.Scene, output_path: str,
     image.save(output_path)
     print(f"Saved rendering to: {output_path}")
 
-    return center, scale
+    return translation, scale
 
 
 # --------------------------
@@ -397,14 +396,13 @@ def main():
         child_vis_rpy=child_vis_rpy
     )
 
-    # Get normalization parameters from reference scene
-    geometry_ref = scene_ref.to_geometry()
-    bounds_ref = geometry_ref.bounds
-    fixed_center = (bounds_ref[0] + bounds_ref[1]) / 2.0
-    fixed_scale = np.linalg.norm(bounds_ref[1] - bounds_ref[0])
+    # Get normalization parameters using the SAME method as normalize_mesh
+    bbox_ref = scene_ref.bounding_box
+    fixed_translation = -bbox_ref.centroid
+    fixed_scale = 2.0 / bbox_ref.primitive.extents.max()
 
-    print(f"[INFO] Fixed normalization:")
-    print(f"  Center: ({fixed_center[0]:.4f}, {fixed_center[1]:.4f}, {fixed_center[2]:.4f})")
+    print(f"[INFO] Fixed normalization (same as normalize_mesh):")
+    print(f"  Translation: ({fixed_translation[0]:.4f}, {fixed_translation[1]:.4f}, {fixed_translation[2]:.4f})")
     print(f"  Scale: {fixed_scale:.4f}")
     print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
 
@@ -430,7 +428,7 @@ def main():
 
         # Render with fixed normalization
         output_path = output_dir / f"angle_{int(angle_deg):03d}.png"
-        render_scene(scene, str(output_path), center=fixed_center, scale=fixed_scale)
+        render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
 
     print(f"\n[DONE] Rendered {len(angles)} images to {output_dir}")
 
