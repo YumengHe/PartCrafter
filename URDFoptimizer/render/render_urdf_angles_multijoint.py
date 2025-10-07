@@ -281,7 +281,7 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
     print(f"[INFO] Found {len(all_links)} links, {len(joints)} joints")
     print(f"[INFO] Root links: {root_links}")
 
-    # Initialize root links with identity transform (link frame, not visual frame)
+    # Initialize root links with identity transform (link frame = world frame)
     for root_link in root_links:
         link_transforms[root_link] = np.eye(4, dtype=np.float32)
         print(f"[DEBUG] Root link '{root_link}' initialized with identity transform")
