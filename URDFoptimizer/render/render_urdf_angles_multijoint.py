@@ -403,7 +403,8 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
 # --------------------------
 
 def render_scene(scene: trimesh.Scene, output_path: str,
-                 translation: np.ndarray = None, scale: float = None):
+                 translation: np.ndarray = None, scale: float = None,
+                 azimuth: float = 0.0, elevation: float = 0.0):
     """
     Render scene using the same settings as datasets/preprocess/render.py
 
@@ -418,6 +419,13 @@ def render_scene(scene: trimesh.Scene, output_path: str,
         output_path: Output image path
         translation: Fixed translation for normalization (if None, compute from scene)
         scale: Fixed scale factor for normalization (if None, compute from scene)
+        azimuth: Camera azimuth angle in degrees (rotation around Y axis)
+        elevation: Camera elevation angle in degrees (rotation from XZ plane)
+
+    Camera coordinate system:
+        - azimuth=0, elevation=0: camera at (0, 0, radius) looking at origin along -Z
+        - azimuth rotates around Y axis (0=front/+Z, 90=right/+X, 180=back/-Z, 270=left/-X)
+        - elevation rotates from XZ plane (0=horizontal, 90=top/+Y, -90=bottom/-Y)
 
     Returns:
         (translation, scale) tuple used for normalization
@@ -446,11 +454,11 @@ def render_scene(scene: trimesh.Scene, output_path: str,
     # Convert to geometry for rendering
     geometry = scene_copy.to_geometry()
 
-    # Render single view with fixed camera
+    # Render single view with camera at specified azimuth/elevation
     image = render_single_view(
         geometry,
-        azimuth=0.0,      # Fixed azimuth
-        elevation=0.0,    # Fixed elevation
+        azimuth=azimuth,
+        elevation=elevation,
         radius=RADIUS,    # Fixed distance
         image_size=IMAGE_SIZE,
         fov=40.0,         # Fixed FOV
@@ -476,6 +484,8 @@ def main():
     parser.add_argument("--angles", type=str, default="0,120", help="Comma-separated list of angles in degrees (applied to ALL revolute joints simultaneously)")
     parser.add_argument("--output", type=str, default="outputs/test4", help="Output directory")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor")
+    parser.add_argument("--azimuth", type=float, default=90.0, help="Camera azimuth angle in degrees (0=+Z front, 90=+X right, 180=-Z back, 270=-X left)")
+    parser.add_argument("--elevation", type=float, default=30.0, help="Camera elevation angle in degrees (0=horizontal, 90=top, -90=bottom)")
     args = parser.parse_args()
 
     # Parse angles
@@ -521,7 +531,10 @@ def main():
     print(f"[INFO] Fixed normalization (same as normalize_mesh):")
     print(f"  Translation: ({fixed_translation[0]:.4f}, {fixed_translation[1]:.4f}, {fixed_translation[2]:.4f})")
     print(f"  Scale: {fixed_scale:.4f}")
-    print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
+    print(f"[INFO] Camera settings:")
+    print(f"  Position: azimuth={args.azimuth}°, elevation={args.elevation}°, radius={RADIUS}")
+    print(f"  (azimuth: 0=+Z front, 90=+X right, 180=-Z back, 270=-X left)")
+    print(f"  (elevation: 0=horizontal, 90=top, -90=bottom)")
 
     # Render all joints at each angle simultaneously
     print(f"\n[INFO] Rendering {len(angles)} poses with ALL joints opening simultaneously at fixed camera...")
@@ -536,9 +549,13 @@ def main():
         # Apply FK for all joints
         scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
 
-        # Render with fixed normalization
+        # Render with fixed normalization and camera position
         output_path = output_dir / f"all_joints_angle_{int(angle_deg):03d}.png"
-        render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
+        render_scene(scene, str(output_path),
+                    translation=fixed_translation,
+                    scale=fixed_scale,
+                    azimuth=args.azimuth,
+                    elevation=args.elevation)
 
     print(f"\n[DONE] Rendered {len(angles)} images (all joints simultaneously) to {output_dir}")
 
