@@ -1,0 +1,107 @@
+<?xml version="1.0" ?>
+<robot name="partnet_109a19840a8fbc774c3aee8e9d3a6ffa">
+	<link name="base"/>
+	<link name="link_0">
+		<visual name="cabinet_door_surface-13">
+			<origin xyz="-0.48763457030600954 0.8759099841117859 -0.23340873158636544"/>
+			<geometry>
+				<mesh filename="glb/part_0_geometry_0.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="-0.48763457030600954 0.8759099841117859 -0.23340873158636544"/>
+			<geometry>
+				<mesh filename="glb/part_0_geometry_0.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_0" type="revolute">
+		<origin xyz="0.48763457030600954 -0.8759099841117859 0.23340873158636544"/>
+		<axis xyz="0 0.9999999999999999 0"/>
+		<child link="link_0"/>
+		<parent link="link_4"/>
+		<limit lower="-0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_1">
+		<visual name="cabinet_door_surface-10">
+			<origin xyz="-0.48763457030600954 0.8759099841117859 -0.23340873158636544"/>
+			<geometry>
+				<mesh filename="glb/part_1_geometry_1.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="-0.48763457030600954 0.8759099841117859 -0.23340873158636544"/>
+			<geometry>
+				<mesh filename="glb/part_1_geometry_1.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_1" type="revolute">
+		<origin xyz="0.48763457030600954 -0.8759099841117859 0.23340873158636544"/>
+		<axis xyz="0 0.9999999999999999 0"/>
+		<child link="link_1"/>
+		<parent link="link_4"/>
+		<limit lower="-0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_2">
+		<visual name="cabinet_door_surface-34">
+			<origin xyz="0.4797364059786151 -0.824106991291046 -0.23562277916602936"/>
+			<geometry>
+				<mesh filename="glb/part_2_geometry_2.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0.4797364059786151 -0.824106991291046 -0.23562277916602936"/>
+			<geometry>
+				<mesh filename="glb/part_2_geometry_2.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_2" type="revolute">
+		<origin xyz="-0.4797364059786151 0.824106991291046 0.23562277916602936"/>
+		<axis xyz="0 -1 0"/>
+		<child link="link_2"/>
+		<parent link="link_4"/>
+		<limit lower="-0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_3">
+		<visual name="cabinet_door_surface-32">
+			<origin xyz="0.4797364059786151 -0.824106991291046 -0.23562277916602936"/>
+			<geometry>
+				<mesh filename="glb/part_3_geometry_3.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0.4797364059786151 -0.824106991291046 -0.23562277916602936"/>
+			<geometry>
+				<mesh filename="glb/part_3_geometry_3.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_3" type="revolute">
+		<origin xyz="-0.4797364059786151 0.824106991291046 0.23562277916602936"/>
+		<axis xyz="0 -1 0"/>
+		<child link="link_3"/>
+		<parent link="link_4"/>
+		<limit lower="-0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_4">
+		<visual name="shelf-3">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_4_geometry_4.glb"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="glb/part_4_geometry_4.glb"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_4" type="fixed">
+		<origin rpy="1.570796326794897 0 -1.570796326794897" xyz="0 0 0"/>
+		<child link="link_4"/>
+		<parent link="base"/>
+	</joint>
+</robot>
