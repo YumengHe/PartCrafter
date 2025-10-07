@@ -471,16 +471,16 @@ def render_scene(scene: trimesh.Scene, output_path: str,
 # --------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Render URDF at different joint angles (all revolute joints)")
+    parser = argparse.ArgumentParser(description="Render URDF at different joint angles (all revolute joints simultaneously)")
     parser.add_argument("--urdf", type=str, default="outputs/test4/mobility.urdf", help="Path to URDF file")
-    parser.add_argument("--angles", type=str, default="0,120", help="Comma-separated list of angles in degrees (applied to ALL revolute joints)")
+    parser.add_argument("--angles", type=str, default="0,120", help="Comma-separated list of angles in degrees (applied to ALL revolute joints simultaneously)")
     parser.add_argument("--output", type=str, default="outputs/test4", help="Output directory")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor")
     args = parser.parse_args()
 
     # Parse angles
     angles = [float(a) for a in args.angles.split(',')]
-    print(f"Will render at angles: {angles} degrees (applied to ALL revolute joints)")
+    print(f"Will render at angles: {angles} degrees (ALL revolute joints open simultaneously at each angle)")
 
     # Create output directory
     output_dir = Path(args.output)
@@ -523,30 +523,24 @@ def main():
     print(f"  Scale: {fixed_scale:.4f}")
     print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
 
-    # Render each joint at different angles
-    # For each joint, render it at specified angles while keeping other joints at 0
-    print(f"\n[INFO] Rendering {len(revolute_joints)} joints, each at {len(angles)} angles with fixed camera...")
+    # Render all joints at each angle simultaneously
+    print(f"\n[INFO] Rendering {len(angles)} poses with ALL joints opening simultaneously at fixed camera...")
 
-    for joint in revolute_joints:
-        joint_name = joint.attrib.get('name', 'unnamed')
-        print(f"\n[INFO] Rendering joint: {joint_name}")
+    for angle_deg in angles:
+        angle_rad = math.radians(angle_deg)
+        print(f"\n[INFO] Rendering ALL joints at {angle_deg}° ({angle_rad:.4f} rad)...")
 
-        for angle_deg in angles:
-            angle_rad = math.radians(angle_deg)
-            print(f"  Rendering at {angle_deg}° ({angle_rad:.4f} rad)...")
+        # Set ALL joints to the same angle
+        joint_angles = {joint.attrib.get('name', 'unnamed'): angle_rad for joint in revolute_joints}
 
-            # Set only current joint to the specified angle, all others to 0
-            joint_angles = {j.attrib.get('name', 'unnamed'): 0.0 for j in revolute_joints}
-            joint_angles[joint_name] = angle_rad
+        # Apply FK for all joints
+        scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
 
-            # Apply FK for all joints
-            scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
+        # Render with fixed normalization
+        output_path = output_dir / f"all_joints_angle_{int(angle_deg):03d}.png"
+        render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
 
-            # Render with fixed normalization
-            output_path = output_dir / f"{joint_name}_angle_{int(angle_deg):03d}.png"
-            render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
-
-    print(f"\n[DONE] Rendered {len(revolute_joints)} joints × {len(angles)} angles = {len(revolute_joints) * len(angles)} images to {output_dir}")
+    print(f"\n[DONE] Rendered {len(angles)} images (all joints simultaneously) to {output_dir}")
 
 
 if __name__ == "__main__":
