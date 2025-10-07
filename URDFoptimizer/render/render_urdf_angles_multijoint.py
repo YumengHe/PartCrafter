@@ -333,7 +333,9 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
                 Trot = np.eye(4, dtype=np.float32)
 
             # Child link frame transform in world frame
-            # This is: parent_link_frame @ joint_origin @ joint_rotation
+            # IMPORTANT: This is the LINK FRAME, not the visual frame
+            # Transform chain: parent_link_frame @ joint_origin @ joint_rotation
+            # Visual origin will be applied later when loading the mesh
             link_transforms[child_link] = link_transforms[parent_link] @ Tj @ Trot
 
             print(f"[DEBUG] Joint '{joint_name}': {parent_link} -> {child_link}")
@@ -376,11 +378,16 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
         Tv = make_SE3(Rv, vis_xyz)
 
         # Total transform: world = link_frame_transform @ visual_origin
+        # This matches the FK chain in render_urdf_angles.py:
+        # - Parent: T_parent = T_parent_visual  (for root link, link_frame is identity)
+        # - Child: T_child = T_parent_link @ T_joint @ T_rotation @ T_child_visual
         T_world = link_transforms[link_name] @ Tv
 
         print(f"[DEBUG] Link '{link_name}' visual:")
         print(f"[DEBUG]   Visual origin xyz: {vis_xyz}, rpy: {vis_rpy}")
         print(f"[DEBUG]   Mesh: {os.path.basename(mesh_path)}")
+        print(f"[DEBUG]   Link frame translation: {link_transforms[link_name][:3, 3]}")
+        print(f"[DEBUG]   Final world translation: {T_world[:3, 3]}")
 
         # Apply transform
         mesh_transformed = mesh.copy()
