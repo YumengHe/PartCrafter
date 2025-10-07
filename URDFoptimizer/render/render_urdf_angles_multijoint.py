@@ -516,26 +516,30 @@ def main():
     print(f"  Scale: {fixed_scale:.4f}")
     print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
 
-    # Render at each angle using the same normalization
-    # ALL revolute joints will be set to the same angle
-    print(f"\n[INFO] Rendering at {len(angles)} angles with fixed camera...")
-    print(f"[INFO] All {len(revolute_joints)} revolute joints will use the same angle for each rendering")
+    # Render each joint at different angles
+    # For each joint, render it at specified angles while keeping other joints at 0
+    print(f"\n[INFO] Rendering {len(revolute_joints)} joints, each at {len(angles)} angles with fixed camera...")
 
-    for angle_deg in angles:
-        angle_rad = math.radians(angle_deg)
-        print(f"\nRendering at {angle_deg}° ({angle_rad:.4f} rad)...")
+    for joint in revolute_joints:
+        joint_name = joint.attrib.get('name', 'unnamed')
+        print(f"\n[INFO] Rendering joint: {joint_name}")
 
-        # Set all revolute joints to the same angle
-        joint_angles = {joint.attrib.get('name', 'unnamed'): angle_rad for joint in revolute_joints}
+        for angle_deg in angles:
+            angle_rad = math.radians(angle_deg)
+            print(f"  Rendering at {angle_deg}° ({angle_rad:.4f} rad)...")
 
-        # Apply FK for all joints
-        scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
+            # Set only current joint to the specified angle, all others to 0
+            joint_angles = {j.attrib.get('name', 'unnamed'): 0.0 for j in revolute_joints}
+            joint_angles[joint_name] = angle_rad
 
-        # Render with fixed normalization
-        output_path = output_dir / f"angle_{int(angle_deg):03d}.png"
-        render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
+            # Apply FK for all joints
+            scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
 
-    print(f"\n[DONE] Rendered {len(angles)} images to {output_dir}")
+            # Render with fixed normalization
+            output_path = output_dir / f"{joint_name}_angle_{int(angle_deg):03d}.png"
+            render_scene(scene, str(output_path), translation=fixed_translation, scale=fixed_scale)
+
+    print(f"\n[DONE] Rendered {len(revolute_joints)} joints × {len(angles)} angles = {len(revolute_joints) * len(angles)} images to {output_dir}")
 
 
 if __name__ == "__main__":
