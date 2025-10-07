@@ -281,9 +281,10 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
     print(f"[INFO] Found {len(all_links)} links, {len(joints)} joints")
     print(f"[INFO] Root links: {root_links}")
 
-    # Initialize root links with identity transform
+    # Initialize root links with identity transform (link frame, not visual frame)
     for root_link in root_links:
         link_transforms[root_link] = np.eye(4, dtype=np.float32)
+        print(f"[DEBUG] Root link '{root_link}' initialized with identity transform")
 
     # Process joints in order (simple: iterate until all processed)
     processed_joints = set()
@@ -331,8 +332,13 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
                 # Fixed joint or other types: no rotation
                 Trot = np.eye(4, dtype=np.float32)
 
-            # Child transform in world frame
+            # Child link frame transform in world frame
+            # This is: parent_link_frame @ joint_origin @ joint_rotation
             link_transforms[child_link] = link_transforms[parent_link] @ Tj @ Trot
+
+            print(f"[DEBUG] Joint '{joint_name}': {parent_link} -> {child_link}")
+            print(f"[DEBUG]   Joint origin xyz: {j_xyz}, rpy: {j_rpy}")
+            print(f"[DEBUG]   Joint angle: {np.rad2deg(joint_angle):.2f}°")
 
             processed_joints.add(joint_name)
             made_progress = True
@@ -369,8 +375,12 @@ def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, un
         Rv = rpy_to_matrix(tuple(vis_rpy))
         Tv = make_SE3(Rv, vis_xyz)
 
-        # Total transform: world = link_transform @ visual_origin
+        # Total transform: world = link_frame_transform @ visual_origin
         T_world = link_transforms[link_name] @ Tv
+
+        print(f"[DEBUG] Link '{link_name}' visual:")
+        print(f"[DEBUG]   Visual origin xyz: {vis_xyz}, rpy: {vis_rpy}")
+        print(f"[DEBUG]   Mesh: {os.path.basename(mesh_path)}")
 
         # Apply transform
         mesh_transformed = mesh.copy()
