@@ -108,6 +108,15 @@ def find_single_revolute_joint(root: ET.Element, joint_name: Optional[str] = Non
     return joints[0]
 
 
+def find_all_revolute_joints(root: ET.Element) -> list:
+    """Find all revolute joints in URDF."""
+    joints = []
+    for j in root.findall('joint'):
+        if j.attrib.get('type') == 'revolute':
+            joints.append(j)
+    return joints
+
+
 def get_link_first_visual(root: ET.Element, link_name: str) -> Tuple[Optional[str], np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Returns (mesh_path, origin_xyz, origin_rpy, scale) for the first <visual> of the link.
@@ -232,6 +241,156 @@ def apply_forward_kinematics(
     return scene
 
 
+def apply_multi_joint_fk(root: ET.Element, urdf_dir: str, joint_angles: dict, unit_scale: float = 1.0) -> trimesh.Scene:
+    """
+    Apply forward kinematics for all links in URDF with multiple revolute joints.
+
+    Args:
+        root: URDF root element
+        urdf_dir: Directory containing URDF (for resolving mesh paths)
+        joint_angles: Dict mapping joint names to angles (in radians)
+        unit_scale: Scale factor for all meshes
+
+    Returns:
+        Scene with all links transformed
+    """
+    scene = trimesh.Scene()
+
+    # Build link-to-transform map (from world frame)
+    link_transforms = {}  # link_name -> 4x4 transform matrix
+
+    # Find root link (link with no parent joint)
+    all_links = {link.attrib['name'] for link in root.findall('link')}
+    child_links = set()
+
+    # Get all joints
+    joints = root.findall('joint')
+
+    # Find child links
+    for joint in joints:
+        child = joint.find('child')
+        if child is not None:
+            child_links.add(child.attrib['link'])
+
+    # Root links are those not children of any joint
+    root_links = all_links - child_links
+
+    if len(root_links) == 0:
+        raise ValueError("No root link found (all links are children)")
+
+    print(f"[INFO] Found {len(all_links)} links, {len(joints)} joints")
+    print(f"[INFO] Root links: {root_links}")
+
+    # Initialize root links with identity transform (link frame, not visual frame)
+    for root_link in root_links:
+        link_transforms[root_link] = np.eye(4, dtype=np.float32)
+        print(f"[DEBUG] Root link '{root_link}' initialized with identity transform")
+
+    # Process joints in order (simple: iterate until all processed)
+    processed_joints = set()
+    max_iterations = len(joints) + 1
+    iteration = 0
+
+    while len(processed_joints) < len(joints) and iteration < max_iterations:
+        iteration += 1
+        made_progress = False
+
+        for joint in joints:
+            joint_name = joint.attrib.get('name', 'unnamed')
+            if joint_name in processed_joints:
+                continue
+
+            parent_link = joint.find('parent').attrib['link']
+            child_link = joint.find('child').attrib['link']
+
+            # Can only process if parent transform is known
+            if parent_link not in link_transforms:
+                continue
+
+            # Get joint parameters
+            jorigin = joint.find('origin')
+            j_xyz = _parse_xyz(jorigin.attrib.get('xyz') if jorigin is not None else None)
+            j_rpy = _parse_rpy(jorigin.attrib.get('rpy') if jorigin is not None else None)
+
+            # Get joint angle (default to 0)
+            joint_angle = joint_angles.get(joint_name, 0.0)
+
+            # Compute joint transform
+            Rj = rpy_to_matrix(tuple(j_rpy))
+            Tj = make_SE3(Rj, j_xyz)
+
+            # Get joint axis and apply rotation
+            if joint.attrib.get('type') == 'revolute':
+                jaxis_el = joint.find('axis')
+                if jaxis_el is not None and 'xyz' in jaxis_el.attrib:
+                    jaxis = _parse_xyz(jaxis_el.attrib['xyz'])
+                    Rrot = axis_angle_to_matrix(jaxis, joint_angle)
+                    Trot = make_SE3(Rrot, np.zeros(3, dtype=np.float32))
+                else:
+                    Trot = np.eye(4, dtype=np.float32)
+            else:
+                # Fixed joint or other types: no rotation
+                Trot = np.eye(4, dtype=np.float32)
+
+            # Child link frame transform in world frame
+            # This is: parent_link_frame @ joint_origin @ joint_rotation
+            link_transforms[child_link] = link_transforms[parent_link] @ Tj @ Trot
+
+            print(f"[DEBUG] Joint '{joint_name}': {parent_link} -> {child_link}")
+            print(f"[DEBUG]   Joint origin xyz: {j_xyz}, rpy: {j_rpy}")
+            print(f"[DEBUG]   Joint angle: {np.rad2deg(joint_angle):.2f}°")
+
+            processed_joints.add(joint_name)
+            made_progress = True
+
+        if not made_progress:
+            break
+
+    if len(processed_joints) < len(joints):
+        print(f"[WARN] Could not process all joints ({len(processed_joints)}/{len(joints)})")
+
+    # Now load and transform all links
+    for link in root.findall('link'):
+        link_name = link.attrib['name']
+
+        if link_name not in link_transforms:
+            print(f"[WARN] No transform for link: {link_name}, skipping")
+            continue
+
+        # Get visual
+        mesh_path, vis_xyz, vis_rpy, scale = get_link_first_visual(root, link_name)
+
+        if mesh_path is None:
+            continue  # No visual
+
+        # Resolve and load mesh
+        mesh_path = resolve_mesh_path(mesh_path, urdf_dir)
+        if not os.path.exists(mesh_path):
+            print(f"[WARN] Mesh not found: {mesh_path}")
+            continue
+
+        mesh = load_mesh(mesh_path, scale, unit_scale)
+
+        # Apply visual origin transform
+        Rv = rpy_to_matrix(tuple(vis_rpy))
+        Tv = make_SE3(Rv, vis_xyz)
+
+        # Total transform: world = link_frame_transform @ visual_origin
+        T_world = link_transforms[link_name] @ Tv
+
+        print(f"[DEBUG] Link '{link_name}' visual:")
+        print(f"[DEBUG]   Visual origin xyz: {vis_xyz}, rpy: {vis_rpy}")
+        print(f"[DEBUG]   Mesh: {os.path.basename(mesh_path)}")
+
+        # Apply transform
+        mesh_transformed = mesh.copy()
+        mesh_transformed.apply_transform(T_world)
+
+        scene.add_geometry(mesh_transformed, node_name=link_name)
+
+    return scene
+
+
 # --------------------------
 # Rendering (using src.utils.render_utils)
 # --------------------------
@@ -305,17 +464,16 @@ def render_scene(scene: trimesh.Scene, output_path: str,
 # --------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Render URDF at different joint angles")
+    parser = argparse.ArgumentParser(description="Render URDF at different joint angles (all revolute joints)")
     parser.add_argument("--urdf", type=str, default="outputs/test4/mobility.urdf", help="Path to URDF file")
-    parser.add_argument("--joint-name", type=str, default=None, help="Name of revolute joint (optional)")
-    parser.add_argument("--angles", type=str, default="0,120,160", help="Comma-separated list of angles in degrees")
+    parser.add_argument("--angles", type=str, default="0,120", help="Comma-separated list of angles in degrees (applied to ALL revolute joints)")
     parser.add_argument("--output", type=str, default="outputs/test4", help="Output directory")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor")
     args = parser.parse_args()
 
     # Parse angles
     angles = [float(a) for a in args.angles.split(',')]
-    print(f"Will render at angles: {angles} degrees")
+    print(f"Will render at angles: {angles} degrees (applied to ALL revolute joints)")
 
     # Create output directory
     output_dir = Path(args.output)
@@ -325,76 +483,28 @@ def main():
     # Parse URDF
     tree = ET.parse(args.urdf)
     root = tree.getroot()
-
-    joint_el = find_single_revolute_joint(root, args.joint_name)
-    joint_name = joint_el.attrib.get('name', 'joint')
-    parent_link = joint_el.find('parent').attrib['link']
-    child_link = joint_el.find('child').attrib['link']
-
-    jorigin = joint_el.find('origin')
-    j_xyz = _parse_xyz(jorigin.attrib.get('xyz') if jorigin is not None else None)
-    j_rpy = _parse_rpy(jorigin.attrib.get('rpy') if jorigin is not None else None)
-
-    jaxis_el = joint_el.find('axis')
-    if jaxis_el is None or 'xyz' not in jaxis_el.attrib:
-        raise ValueError("Revolute joint must have an <axis xyz='...'> element.")
-    jaxis = _parse_xyz(jaxis_el.attrib['xyz'])
-
-    print(f"\n[INFO] URDF Joint Information:")
-    print(f"  Joint name: {joint_name}")
-    print(f"  Parent link: {parent_link}")
-    print(f"  Child link: {child_link}")
-    print(f"  Joint origin xyz: {j_xyz}")
-    print(f"  Joint origin rpy: {j_rpy}")
-    print(f"  Joint axis: {jaxis}")
-
-    # Get link visuals
     urdf_dir = os.path.dirname(os.path.abspath(args.urdf))
 
-    parent_mesh_path, parent_vis_xyz, parent_vis_rpy, parent_scale = get_link_first_visual(root, parent_link)
-    child_mesh_path, child_vis_xyz, child_vis_rpy, child_scale = get_link_first_visual(root, child_link)
+    # Find all revolute joints
+    revolute_joints = find_all_revolute_joints(root)
 
-    print(f"\n[INFO] Parent visual:")
-    print(f"  Mesh: {parent_mesh_path}")
-    print(f"  Origin xyz: {parent_vis_xyz}, rpy: {parent_vis_rpy}")
-    print(f"  Scale: {parent_scale}")
+    if len(revolute_joints) == 0:
+        raise ValueError("No revolute joints found in URDF")
 
-    print(f"\n[INFO] Child visual:")
-    print(f"  Mesh: {child_mesh_path}")
-    print(f"  Origin xyz: {child_vis_xyz}, rpy: {child_vis_rpy}")
-    print(f"  Scale: {child_scale}")
+    print(f"\n[INFO] Found {len(revolute_joints)} revolute joints:")
+    for joint in revolute_joints:
+        joint_name = joint.attrib.get('name', 'unnamed')
+        parent_link = joint.find('parent').attrib['link']
+        child_link = joint.find('child').attrib['link']
+        print(f"  - {joint_name}: {parent_link} -> {child_link}")
 
-    # Resolve mesh paths
-    parent_mesh_path = resolve_mesh_path(parent_mesh_path, urdf_dir)
-    child_mesh_path = resolve_mesh_path(child_mesh_path, urdf_dir)
-
-    # Load meshes
-    if parent_mesh_path is None:
-        print("[WARN] Parent has no mesh, creating dummy mesh")
-        parent_mesh = trimesh.Trimesh(vertices=[[0,0,0],[1e-6,0,0],[0,1e-6,0]], faces=[[0,1,2]])
-    else:
-        parent_mesh = load_mesh(parent_mesh_path, parent_scale, args.unit_scale)
-
-    if child_mesh_path is None:
-        raise ValueError("Child link has no visual mesh")
-
-    child_mesh = load_mesh(child_mesh_path, child_scale, args.unit_scale)
-
-    # Compute normalization parameters from angle=0 scene (reference pose)
+    # Compute normalization parameters from angle=0 reference pose
     # This ensures camera stays fixed for all angles
-    print(f"\n[INFO] Computing normalization from angle=0 reference pose...")
-    scene_ref = apply_forward_kinematics(
-        parent_mesh=parent_mesh,
-        child_mesh=child_mesh,
-        parent_vis_xyz=parent_vis_xyz,
-        parent_vis_rpy=parent_vis_rpy,
-        joint_xyz=j_xyz,
-        joint_rpy=j_rpy,
-        joint_axis=jaxis,
-        joint_angle=0.0,  # Reference at angle=0
-        child_vis_xyz=child_vis_xyz,
-        child_vis_rpy=child_vis_rpy
-    )
+    print(f"\n[INFO] Computing normalization from all-joints-at-0 reference pose...")
+
+    # All joints at angle 0
+    joint_angles_ref = {joint.attrib.get('name', 'unnamed'): 0.0 for joint in revolute_joints}
+    scene_ref = apply_multi_joint_fk(root, urdf_dir, joint_angles_ref, args.unit_scale)
 
     # Get normalization parameters using the SAME method as normalize_mesh
     bbox_ref = scene_ref.bounding_box
@@ -407,24 +517,19 @@ def main():
     print(f"[INFO] Camera will stay at fixed position (0, 0, {RADIUS}) looking at origin")
 
     # Render at each angle using the same normalization
+    # ALL revolute joints will be set to the same angle
     print(f"\n[INFO] Rendering at {len(angles)} angles with fixed camera...")
+    print(f"[INFO] All {len(revolute_joints)} revolute joints will use the same angle for each rendering")
+
     for angle_deg in angles:
         angle_rad = math.radians(angle_deg)
         print(f"\nRendering at {angle_deg}° ({angle_rad:.4f} rad)...")
 
-        # Apply FK
-        scene = apply_forward_kinematics(
-            parent_mesh=parent_mesh,
-            child_mesh=child_mesh,
-            parent_vis_xyz=parent_vis_xyz,
-            parent_vis_rpy=parent_vis_rpy,
-            joint_xyz=j_xyz,
-            joint_rpy=j_rpy,
-            joint_axis=jaxis,
-            joint_angle=angle_rad,
-            child_vis_xyz=child_vis_xyz,
-            child_vis_rpy=child_vis_rpy
-        )
+        # Set all revolute joints to the same angle
+        joint_angles = {joint.attrib.get('name', 'unnamed'): angle_rad for joint in revolute_joints}
+
+        # Apply FK for all joints
+        scene = apply_multi_joint_fk(root, urdf_dir, joint_angles, args.unit_scale)
 
         # Render with fixed normalization
         output_path = output_dir / f"angle_{int(angle_deg):03d}.png"
