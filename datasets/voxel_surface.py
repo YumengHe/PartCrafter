@@ -409,14 +409,11 @@ def main():
             print(f"Error: --subfolder requires a directory, but {input_path} is not a directory")
             sys.exit(1)
         ok = process_subfolders(input_path, args.resolution, args.min_thickness_voxels,
-                               args.mem_limit_mb, args.weld_tol, args.target_faces)
+                               args.mem_limit_mb, args.weld_tol, args.target_faces, args.jobs)
     elif input_path.is_dir():
         # Regular folder processing
         ok = process_folder(input_path, args.resolution, args.min_thickness_voxels,
                             args.mem_limit_mb, args.weld_tol, args.target_faces)
-    elif args.subfolder:
-        ok = process_subfolders(input_path, args.resolution, args.min_thickness_voxels,
-                               args.mem_limit_mb, args.weld_tol, args.target_faces, args.jobs)
     else:
         # Single file
         out = input_path.parent / f"{input_path.stem}_voxel_{args.resolution}.glb"
