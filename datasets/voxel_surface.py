@@ -20,14 +20,33 @@ Notes:
 - Requires trimesh >= 4.x and numpy.
 - target-faces=0 disables decimation; set to e.g. 50k to compress large meshes.
 """
+import os
+# Set defaults only if not already set from shell
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import argparse
 import sys
 import trimesh
 import numpy as np
 from pathlib import Path
-import os
 import math
+
+# --------------------------- 并行处理 ----------------------------
+def _limit_threads():
+    for k in ["OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS"]:
+        os.environ[k] = "1"
+
+def _process_one_subfolder(subfolder, voxel_resolution, min_thickness_voxels,
+                           mem_limit_mb, weld_tol, target_faces):
+    part_glb_path = Path(subfolder) / "part.glb"
+    voxel_output_path = Path(subfolder) / "voxel.glb"
+    ok = process_file(part_glb_path, voxel_output_path, voxel_resolution,
+                      min_thickness_voxels, mem_limit_mb, weld_tol, target_faces)
+    return (str(subfolder), ok)
 
 # --------------------------- helpers ---------------------------------
 
@@ -294,7 +313,7 @@ def process_folder(input_folder, voxel_resolution=100, min_thickness_voxels=3, m
     return ok == len(glb_files)
 
 def process_subfolders(input_folder, voxel_resolution=100, min_thickness_voxels=3, mem_limit_mb=400,
-                      weld_tol=1e-6, target_faces=0):
+                      weld_tol=1e-6, target_faces=0, jobs=1):
     """Process all subfolders containing part.glb files."""
     input_path = Path(input_folder)
     if not input_path.exists():
@@ -320,21 +339,43 @@ def process_subfolders(input_folder, voxel_resolution=100, min_thickness_voxels=
     print(f"Input directory: {input_path}")
     print("-" * 60)
 
+    if jobs <= 1:
+        # 原有串行分支（保留）
+        ok = 0
+        for i, subfolder in enumerate(subfolders, 1):
+            print(f"\n[{i}/{len(subfolders)}] Processing {subfolder.name}/part.glb")
+            part_glb_path = subfolder / "part.glb"
+            voxel_output_path = subfolder / "voxel.glb"
+            if process_file(part_glb_path, voxel_output_path, voxel_resolution, min_thickness_voxels,
+                            mem_limit_mb, weld_tol, target_faces):
+                ok += 1
+                print(f"✓ Created: {voxel_output_path}")
+            else:
+                print(f"✗ Failed to process {subfolder.name}/part.glb")
+            print("-" * 40)
+        print(f"\nDone: {ok}/{len(subfolders)} succeeded")
+        return ok == len(subfolders)
+    
+    # 并行分支
+    print(f"Running with {jobs} parallel workers ...")
     ok = 0
-    for i, subfolder in enumerate(subfolders, 1):
-        print(f"\n[{i}/{len(subfolders)}] Processing {subfolder.name}/part.glb")
-        
-        part_glb_path = subfolder / "part.glb"
-        voxel_output_path = subfolder / "voxel.glb"
-        
-        if process_file(part_glb_path, voxel_output_path, voxel_resolution, min_thickness_voxels, 
-                       mem_limit_mb, weld_tol, target_faces):
-            ok += 1
-            print(f"✓ Created: {voxel_output_path}")
-        else:
-            print(f"✗ Failed to process {subfolder.name}/part.glb")
-        print("-" * 40)
-
+    with ProcessPoolExecutor(max_workers=jobs, initializer=_limit_threads) as ex:
+        futures = {
+            ex.submit(_process_one_subfolder, str(sf), voxel_resolution, min_thickness_voxels,
+                      mem_limit_mb, weld_tol, target_faces): sf
+            for sf in subfolders
+        }
+        for fut in as_completed(futures):
+            subfolder = futures[fut]
+            try:
+                name, success = fut.result()
+                if success:
+                    ok += 1
+                    print(f"✓ Created: {Path(name) / 'voxel.glb'}")
+                else:
+                    print(f"✗ Failed: {name}")
+            except Exception as e:
+                print(f"✗ Error in {subfolder}: {e}")
     print(f"\nDone: {ok}/{len(subfolders)} succeeded")
     return ok == len(subfolders)
 
@@ -347,6 +388,7 @@ def main():
     ap.add_argument("--weld-tol", type=float, default=1e-6, help="Vertex weld tolerance in world units (default 1e-6)")
     ap.add_argument("--target-faces", type=int, default=0, help="Optional decimation target faces (0=disabled)")
     ap.add_argument("--subfolder", action="store_true", help="Process subfolders containing part.glb files, output as voxel.glb")
+    ap.add_argument("--jobs", type=int, default=1, help="Parallel workers for subfolder mode (default 1)")
     args = ap.parse_args()
 
     input_path = Path(args.input_path)
@@ -372,6 +414,9 @@ def main():
         # Regular folder processing
         ok = process_folder(input_path, args.resolution, args.min_thickness_voxels,
                             args.mem_limit_mb, args.weld_tol, args.target_faces)
+    elif args.subfolder:
+        ok = process_subfolders(input_path, args.resolution, args.min_thickness_voxels,
+                               args.mem_limit_mb, args.weld_tol, args.target_faces, args.jobs)
     else:
         # Single file
         out = input_path.parent / f"{input_path.stem}_voxel_{args.resolution}.glb"
