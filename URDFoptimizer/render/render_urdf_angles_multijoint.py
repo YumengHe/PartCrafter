@@ -484,8 +484,8 @@ def main():
     parser.add_argument("--angles", type=str, default="0,120", help="Comma-separated list of angles in degrees (applied to ALL revolute joints simultaneously)")
     parser.add_argument("--output", type=str, default="outputs/test4", help="Output directory")
     parser.add_argument("--unit-scale", type=float, default=1.0, help="Scale meshes by this factor")
-    parser.add_argument("--azimuth", type=float, default=90.0, help="Camera azimuth angle in degrees (0=+Z front, 90=+X right, 180=-Z back, 270=-X left)")
-    parser.add_argument("--elevation", type=float, default=30.0, help="Camera elevation angle in degrees (0=horizontal, 90=top, -90=bottom)")
+    parser.add_argument("--azimuth", type=float, default=270.0, help="Camera azimuth angle in degrees (0=+Z front, 90=+X right, 180=-Z back, 270=-X left)")
+    parser.add_argument("--elevation", type=float, default=0.0, help="Camera elevation angle in degrees (0=horizontal, 90=top, -90=bottom)")
     args = parser.parse_args()
 
     # Parse angles

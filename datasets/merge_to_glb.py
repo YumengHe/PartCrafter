@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Merge OBJ files to GLB format with two outputs:
-1. part.glb - Merged parts without textures
-2. texture.glb - Preserved original parts with textures
-
-Usage:
-    python merge_to_glb.py mesh/partnet mesh/partnet_glb --single 35059
-    python merge_to_glb.py mesh/partnet mesh/partnet_glb --range 35059 35100
-"""
 
 import os
 import sys
