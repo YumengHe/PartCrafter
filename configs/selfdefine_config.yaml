@@ -14,13 +14,13 @@ dataset:
     - 'preprocessed_data/object_part_configs.json' # Modify this path if you use your own dataset
   training_ratio: 0.9
   min_num_parts: 1
-  max_num_parts: 8
-  max_iou_mean: 1.0
-  max_iou_max: 1.0
+  max_num_parts: 16
+  max_iou_mean: 0.5
+  max_iou_max: 0.5
   shuffle_parts: false  # IMPORTANT: Must be false when using per-part images to maintain part-image correspondence
-  object_ratio: 0.0
-  rotating_ratio: 0.0
-  rotating_degree: 10
+  object_ratio: 0.3
+  rotating_ratio: 0.2
+  ratating_degree: 10
 
 optimizer:
   name: "adamw"
@@ -33,11 +33,11 @@ optimizer:
 
 lr_scheduler:
   name: "cosine_warmup"
-  num_warmup_steps: 20
+  num_warmup_steps: 200
 
 train:
-  batch_size_per_gpu: 8
-  epochs: 200
+  batch_size_per_gpu: 16
+  epochs: 10
   grad_checkpoint: true
   weighting_scheme: "logit_normal"
   logit_mean: 0.0
@@ -51,7 +51,7 @@ train:
   eval_freq: 1000
   save_freq: 2000
   eval_freq_epoch: 10
-  save_freq_epoch: 50
+  save_freq_epoch: 20
   ema_kwargs:
     decay: 0.9999
     use_ema_warmup: true
@@ -61,7 +61,7 @@ train:
 val:
   batch_size_per_gpu: 1
   nrow: 4
-  min_num_parts: 1
+  min_num_parts: 2
   max_num_parts: 8
   num_inference_steps: 50
   max_num_expanded_coords: 1e8
