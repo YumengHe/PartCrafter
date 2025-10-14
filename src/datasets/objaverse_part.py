@@ -34,6 +34,8 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
         self.shuffle_parts = configs['dataset']['shuffle_parts']
         self.training_ratio = configs['dataset']['training_ratio']
         self.balance_object_and_parts = configs['dataset'].get('balance_object_and_parts', False)
+        self.random_split = configs['dataset'].get('random_split', False)
+        self.split_seed = configs['dataset'].get('split_seed', 42)
 
         self.rotating_ratio = configs['dataset'].get('rotating_ratio', 0.0)
         self.rotating_degree = configs['dataset'].get('rotating_degree', 10.0)
@@ -46,10 +48,16 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
             for config in configs['dataset']['config']:
                 local_data_configs = json.load(open(config))
                 if self.balance_object_and_parts:
+                    # Shuffle local_data_configs if random_split is enabled
+                    if self.random_split:
+                        random.seed(self.split_seed)
+                        random.shuffle(local_data_configs)
+
+                    split_idx = int(len(local_data_configs) * self.training_ratio)
                     if self.training:
-                        local_data_configs = local_data_configs[:int(len(local_data_configs) * self.training_ratio)]
+                        local_data_configs = local_data_configs[:split_idx]
                     else:
-                        local_data_configs = local_data_configs[int(len(local_data_configs) * self.training_ratio):]
+                        local_data_configs = local_data_configs[split_idx:]
                         local_data_configs = [config for config in local_data_configs if self.val_min_num_parts <= config['num_parts'] <= self.val_max_num_parts]
                 data_configs += local_data_configs
         else:
@@ -60,10 +68,16 @@ class ObjaversePartDataset(torch.utils.data.Dataset):
             data_configs = [config for config in data_configs if config['iou_mean'] <= self.max_iou_mean]
             data_configs = [config for config in data_configs if config['iou_max'] <= self.max_iou_max]
         if not self.balance_object_and_parts:
+            # Shuffle data_configs if random_split is enabled
+            if self.random_split:
+                random.seed(self.split_seed)
+                random.shuffle(data_configs)
+
+            split_idx = int(len(data_configs) * self.training_ratio)
             if self.training:
-                data_configs = data_configs[:int(len(data_configs) * self.training_ratio)]
+                data_configs = data_configs[:split_idx]
             else:
-                data_configs = data_configs[int(len(data_configs) * self.training_ratio):]
+                data_configs = data_configs[split_idx:]
                 data_configs = [config for config in data_configs if self.val_min_num_parts <= config['num_parts'] <= self.val_max_num_parts]
         self.data_configs = data_configs
         self.image_size = (512, 512)

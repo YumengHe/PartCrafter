@@ -16,36 +16,55 @@ IMAGE_SIZE = (2048, 2048)
 LIGHT_INTENSITY = 2.0
 NUM_ENV_LIGHTS = 36
 
-def load_all_textured_objs(textured_objs_dir: Path, images_dir: Path) -> trimesh.Scene:
+def resize_texture(texture_image, max_size=2048):
+    """Resize texture to prevent OpenGL texture size errors"""
+    if isinstance(texture_image, Image.Image):
+        width, height = texture_image.size
+        if width > max_size or height > max_size:
+            # Calculate new dimensions maintaining aspect ratio
+            ratio = min(max_size / width, max_size / height)
+            new_width = int(width * ratio)
+            new_height = int(height * ratio)
+            print(f"Resizing texture from {width}x{height} to {new_width}x{new_height}")
+            return texture_image.resize((new_width, new_height), Image.LANCZOS)
+    return texture_image
+
+def load_all_textured_objs(textured_objs_dir: Path, images_dir: Path, max_texture_size=2048) -> trimesh.Scene:
     """Load all OBJ files from textured_objs directory with materials and textures"""
     scene = trimesh.Scene()
-    
+
     obj_files = list(textured_objs_dir.glob("*.obj"))
     if not obj_files:
         raise ValueError(f"No OBJ files found in {textured_objs_dir}")
-    
+
     print(f"Loading {len(obj_files)} OBJ files with textures...")
-    
+
     for obj_file in obj_files:
         try:
             # Load OBJ with materials
             loaded_mesh = trimesh.load(str(obj_file), process=False)
-            
+
+            # Process textures to limit their size
             if isinstance(loaded_mesh, trimesh.Trimesh):
+                if hasattr(loaded_mesh.visual, 'material') and hasattr(loaded_mesh.visual.material, 'image'):
+                    loaded_mesh.visual.material.image = resize_texture(loaded_mesh.visual.material.image, max_texture_size)
                 scene.add_geometry(loaded_mesh, node_name=obj_file.stem)
             elif isinstance(loaded_mesh, trimesh.Scene):
                 # Add all geometries from the loaded scene
                 for geom_name, geometry in loaded_mesh.geometry.items():
+                    # Resize textures for each geometry
+                    if hasattr(geometry.visual, 'material') and hasattr(geometry.visual.material, 'image'):
+                        geometry.visual.material.image = resize_texture(geometry.visual.material.image, max_texture_size)
                     unique_name = f"{obj_file.stem}_{geom_name}"
                     scene.add_geometry(geometry, geom_name=unique_name)
-                    
+
         except Exception as e:
             print(f"Warning: Failed to load {obj_file.name}: {e}")
             continue
-    
+
     if len(scene.geometry) == 0:
         raise ValueError("No valid geometries loaded from textured_objs")
-    
+
     print(f"Successfully loaded {len(scene.geometry)} parts")
     return scene
 
