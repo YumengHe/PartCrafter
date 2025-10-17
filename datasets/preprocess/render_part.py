@@ -23,19 +23,6 @@ IMAGE_SIZE = (2048, 2048)
 LIGHT_INTENSITY = 2.0
 NUM_ENV_LIGHTS = 36
 
-def resize_texture(texture_image, max_size=2048):
-    """Resize texture to prevent OpenGL texture size errors"""
-    if isinstance(texture_image, Image.Image):
-        width, height = texture_image.size
-        if width > max_size or height > max_size:
-            # Calculate new dimensions maintaining aspect ratio
-            ratio = min(max_size / width, max_size / height)
-            new_width = int(width * ratio)
-            new_height = int(height * ratio)
-            print(f"Resizing texture from {width}x{height} to {new_width}x{new_height}")
-            return texture_image.resize((new_width, new_height), Image.LANCZOS)
-    return texture_image
-
 def parse_urdf_links(urdf_path):
     """
     Parse URDF file and extract link to mesh file mappings.
@@ -74,16 +61,15 @@ def parse_urdf_links(urdf_path):
         return {}
 
 
-def load_link_meshes(dataset_folder, link_name, mesh_files, max_texture_size=2048):
+def load_link_meshes(dataset_folder, link_name, mesh_files):
     """
     Load and combine all mesh files for a specific link.
-
+    
     Args:
         dataset_folder (str): Path to the dataset folder
         link_name (str): Name of the link
         mesh_files (list): List of mesh files for this link
-        max_texture_size (int): Maximum texture dimension (default 2048)
-
+        
     Returns:
         trimesh.Scene or None: Combined mesh scene for the link
     """
@@ -100,33 +86,27 @@ def load_link_meshes(dataset_folder, link_name, mesh_files, max_texture_size=204
         if not os.path.exists(obj_path):
             print(f"Warning: {mesh_file} not found for link {link_name}")
             continue
-
+            
         try:
             # Load mesh with textures if available
             mesh = trimesh.load(obj_path, process=False)
-
+            
             if isinstance(mesh, trimesh.Trimesh):
-                # Resize texture if present
-                if hasattr(mesh.visual, 'material') and hasattr(mesh.visual.material, 'image'):
-                    mesh.visual.material.image = resize_texture(mesh.visual.material.image, max_texture_size)
                 link_meshes.append(mesh)
             elif isinstance(mesh, trimesh.Scene):
                 # Extract all geometries from scene
                 for geometry in mesh.geometry.values():
                     if isinstance(geometry, trimesh.Trimesh):
-                        # Resize texture if present
-                        if hasattr(geometry.visual, 'material') and hasattr(geometry.visual.material, 'image'):
-                            geometry.visual.material.image = resize_texture(geometry.visual.material.image, max_texture_size)
                         link_meshes.append(geometry)
-
+        
         except Exception as e:
             print(f"Error loading {mesh_file}: {e}")
             continue
-
+    
     if not link_meshes:
         print(f"No valid meshes found for link {link_name}")
         return None
-
+    
     # Create scene with all meshes for this link
     if len(link_meshes) == 1:
         scene = trimesh.Scene(link_meshes[0])
@@ -134,7 +114,7 @@ def load_link_meshes(dataset_folder, link_name, mesh_files, max_texture_size=204
         scene = trimesh.Scene()
         for i, mesh in enumerate(link_meshes):
             scene.add_geometry(mesh, node_name=f"{link_name}_part_{i}")
-
+    
     return scene
 
 
